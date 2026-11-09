@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.0
+
+- CI su Ubuntu/macOS e verifica del tarball realmente installato in un ambiente temporaneo.
+- Scorciatoia Ctrl+Alt+S per interrompere la lettura, configurabile con `PI_VOCE_STOP_KEY`.
+- Elenco risposte con prompt associato, data/ora, indicatore della riproduzione e filtro `/voce risposte [filtro]`.
+- Indicatore nel footer con voce, velocità, lettura automatica e stato della riproduzione.
+- `/voce risposte` per scegliere una risposta completa del ramo corrente, più recenti in alto.
+- `/voce sessione <comando>` per modifiche temporanee senza scrivere le preferenze salvate.
+- `/voce salva` per salvare tutte le impostazioni correnti e `/voce ripristina` per ricaricare quelle persistenti.
+- `/voce status` distingue impostazioni correnti e predefinite salvate in sezioni multilinea; il footer usa i colori del tema e indica le differenze con «sessione».
+- I comandi persistenti salvano solo i campi modificati, senza rendere permanenti altri override temporanei.
+- La navigazione nell'albero interrompe la lettura del vecchio ramo.
+
 ## 0.3.0
 
 - Lettura automatica disabilitata al primo utilizzo; le preferenze precedenti sono conservate.

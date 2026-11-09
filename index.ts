@@ -5,28 +5,57 @@ import { defaults, loadSettings, saveSettings, validRate, type Settings } from "
 import { readable } from "./text.ts";
 import { languageLabel, parseVoices, resolveVoice, voiceLabel, type Voice } from "./voices.ts";
 import { SpeechPlayer } from "./playback.ts";
+import { repliesInBranch } from "./history.ts";
+import { stopShortcut } from "./shortcut.ts";
 
 export default function (pi: ExtensionAPI) {
   let settings = { ...defaults };
+  let saved = { ...defaults };
+  let uiContext: ExtensionContext | undefined;
+  let playingVoice: string | undefined;
+  let playingRate: number | undefined;
+  let readingReplyId: string | undefined;
+  const shortcut = stopShortcut(process.env.PI_VOCE_STOP_KEY);
+  const mutableCommands = ["on", "off", "velocita", "voce", "elenco", "config", "testo"];
+  const isTemporary = () => (Object.keys(defaults) as (keyof Settings)[]).some((key) => settings[key] !== saved[key]);
+  function updateFooter() {
+    if (uiContext?.mode !== "tui") return;
+    const text = `Voce: ${playingVoice || settings.voice} · ${playingRate ?? settings.rate} p/min · auto ${settings.enabled ? "on" : "off"}${isTemporary() ? " · sessione" : ""}${playingVoice ? " · lettura in corso" : ""}`;
+    uiContext.ui.setStatus("pi-voce", uiContext.ui.theme.fg("dim", text));
+  }
   let pending = "";
   let request = 0;
   const configPath = join(process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent"), "pi-voce.json");
   // Shared by this user's sessions, including sessions with different agent dirs.
   const lockPath = process.env.PI_VOCE_LOCK_PATH || join(homedir(), ".pi", "pi-voce-audio.lock");
-  const player = new SpeechPlayer(lockPath);
+  const player = new SpeechPlayer(lockPath, (voice, rate) => {
+    playingVoice = voice; playingRate = rate;
+    if (!voice) readingReplyId = undefined;
+    updateFooter();
+  });
 
-  async function stop() { request++; await player.stop(); }
-  async function apply(next: Settings) {
-    await saveSettings(configPath, next);
-    settings = next;
+  async function stop() { request++; await player.stop(); readingReplyId = undefined; }
+  if (shortcut.key) pi.registerShortcut(shortcut.key, {
+    description: "Pi Voce: interrompi la lettura di questa sessione",
+    handler: async (ctx) => { uiContext = ctx; await stop(); },
+  });
+  async function apply(patch: Partial<Settings>, temporary = false) {
+    if (!temporary) {
+      // Persist only the requested fields: unrelated temporary overrides stay local.
+      const nextSaved = { ...await loadSettings(configPath), ...patch };
+      await saveSettings(configPath, nextSaved);
+      saved = nextSaved;
+    }
+    settings = { ...settings, ...patch };
     await stop();
+    updateFooter();
   }
   async function listVoices() {
     const result = await pi.exec("/usr/bin/say", ["-v", "?"], { timeout: 10000 });
     if (result.code !== 0) throw new Error(result.stderr.trim() || `say è terminato con codice ${result.code}`);
     return parseVoices(result.stdout);
   }
-  async function speak(text: string | undefined, ctx: ExtensionContext, preferred = settings) {
+  async function speak(text: string | undefined, ctx: ExtensionContext, preferred = settings, replyId?: string) {
     const ticket = ++request;
     await player.stop();
     try {
@@ -39,15 +68,21 @@ export default function (pi: ExtensionAPI) {
       }
       const speech = text === undefined ? chosen.sample || "Questa è una prova della voce selezionata." : readable(text, preferred);
       if (!speech.trim()) { ctx.ui.notify("Nessun testo da leggere.", "info"); return; }
-      await player.play(speech, chosen.name, preferred.rate, (message) => ctx.ui.notify(message, "warning"));
+      readingReplyId = replyId;
+      const started = await player.play(speech, chosen.name, preferred.rate, (message) => ctx.ui.notify(message, "warning"));
+      if (!started && ticket === request) readingReplyId = undefined;
     } catch (error) {
+      if (ticket === request) readingReplyId = undefined;
       ctx.ui.notify(`Lettura vocale: ${error instanceof Error ? error.message : String(error)}`, "error");
     }
   }
 
   pi.on("session_start", async (_event, ctx) => {
-    try { settings = await loadSettings(configPath); }
+    uiContext = ctx;
+    if (shortcut.warning) ctx.ui.notify(shortcut.warning, "warning");
+    try { settings = await loadSettings(configPath); saved = { ...settings }; }
     catch (error) { ctx.ui.notify(`Preferenze vocali non caricate: ${error instanceof Error ? error.message : String(error)}`, "warning"); }
+    updateFooter();
   });
   pi.on("before_agent_start", async () => { pending = ""; await stop(); });
   pi.on("message_end", (event, ctx) => {
@@ -59,9 +94,18 @@ export default function (pi: ExtensionAPI) {
   pi.on("agent_settled", async (event, ctx) => {
     const text = pending;
     pending = "";
-    if (ctx.mode === "tui" && settings.enabled && !event.aborted && text) await speak(text, ctx);
+    if (ctx.mode === "tui" && settings.enabled && !event.aborted && text) {
+      const last = repliesInBranch(ctx.sessionManager.getBranch())[0];
+      await speak(text, ctx, settings, last?.text === text ? last.id : undefined);
+    }
   });
-  pi.on("session_shutdown", async () => { pending = ""; await stop(); });
+  pi.on("session_tree", async () => { pending = ""; await stop(); });
+  pi.on("session_shutdown", async () => {
+    pending = "";
+    await stop();
+    if (uiContext?.mode === "tui") uiContext.ui.setStatus("pi-voce", undefined);
+    uiContext = undefined;
+  });
 
   async function chooseLocale(ctx: ExtensionContext, voices: Voice[]) {
     const locales = [...new Set(voices.map((item) => item.locale))].sort();
@@ -73,22 +117,28 @@ export default function (pi: ExtensionAPI) {
     const selected = await ctx.ui.select("Scegli una voce (Esc per annullare)", voices.map((item) => voiceLabel(item, settings)));
     return voices.find((item) => voiceLabel(item, settings) === selected);
   }
-  async function configureText(ctx: ExtensionContext) {
-    const next = { ...settings };
+  async function configureText(ctx: ExtensionContext, temporary: boolean) {
+    const next = { readCode: settings.readCode, readUrls: settings.readUrls, readTables: settings.readTables };
     for (const [key, title] of [["readCode", "Blocchi di codice"], ["readUrls", "Indirizzi web"], ["readTables", "Tabelle"]] as const) {
       const selected = await ctx.ui.select(`${title} (attuale: ${next[key] ? "leggi" : "ometti"})`, ["Leggi", "Ometti"]);
       if (selected !== "Leggi" && selected !== "Ometti") return;
       next[key] = selected === "Leggi";
     }
-    await apply(next);
-    ctx.ui.notify("Preferenze del testo salvate.", "info");
+    await apply(next, temporary);
+    ctx.ui.notify(temporary ? "Preferenze del testo applicate solo a questa sessione." : "Preferenze del testo salvate.", "info");
   }
 
   pi.registerCommand("voce", {
-    description: "Leggi l'ultima risposta; status, config, testo, on, off, stop, anteprima, velocita [80–400], elenco [lingua o nome], voce [lingua o nome]",
+    description: "Leggi l'ultima risposta; risposte, status, config, sessione <comando>, salva, ripristina, testo, on, off, stop, anteprima, velocita [80–400], elenco [lingua o nome], voce [lingua o nome]",
     getArgumentCompletions: async (prefix) => {
+      const scope = prefix.startsWith("sessione ") ? "sessione " : "";
+      if (scope) prefix = prefix.slice(scope.length);
       const subcommands = [
-        { value: "status", label: "status", description: "Mostra lo stato" },
+        { value: "risposte", label: "risposte [filtro]", description: "Cerca per prompt, risposta o data e scegli cosa ascoltare" },
+        { value: "sessione", label: "sessione <comando>", description: "Modifica temporanea, senza salvare" },
+        { value: "salva", label: "salva", description: "Salva tutte le impostazioni correnti come predefinite" },
+        { value: "ripristina", label: "ripristina", description: "Ricarica le preferenze salvate e scarta le modifiche temporanee" },
+        { value: "status", label: "status", description: "Mostra impostazioni correnti e salvate" },
         { value: "config", label: "config", description: "Configura lingua, voce, velocità e lettura automatica" },
         { value: "testo", label: "testo", description: "Scegli se leggere codice, URL e tabelle" },
         { value: "anteprima", label: "anteprima", description: "Ascolta una frase di prova" },
@@ -108,42 +158,95 @@ export default function (pi: ExtensionAPI) {
           if (localeAndName) {
             const [, locale, partialName] = localeAndName;
             return voices.filter((item) => item.locale.toLowerCase() === locale.toLowerCase() && item.name.toLowerCase().startsWith(partialName.toLowerCase()))
-              .map((item) => ({ value: `${match[1]} ${locale} ${item.name}`, label: item.name, description: item.name === settings.voice && item.locale === settings.locale ? "Voce attuale" : "" }));
+              .map((item) => ({ value: `${scope}${match[1]} ${locale} ${item.name}`, label: item.name, description: item.name === settings.voice && item.locale === settings.locale ? "Voce attuale" : "" }));
           }
           return [...new Set(voices.map((item) => item.locale))].sort()
             .filter((locale) => `${locale} ${languageLabel(locale)}`.toLowerCase().includes(query.toLowerCase()))
-            .map((locale) => ({ value: `${match[1]} ${locale}`, label: languageLabel(locale) }));
+            .map((locale) => ({ value: `${scope}${match[1]} ${locale}`, label: languageLabel(locale) }));
         } catch { return null; }
       }
-      const matches = subcommands.filter((item) => item.value.startsWith(prefix.toLowerCase()));
+      const matches = subcommands.filter((item) => (!scope || mutableCommands.includes(item.value)) && item.value.startsWith(prefix.toLowerCase()))
+        .map((item) => ({ ...item, value: scope + item.value }));
       return matches.length ? matches : null;
     },
     handler: async (args, ctx) => {
       try {
-        const [action, ...rest] = args.trim().split(/\s+/);
+        uiContext = ctx;
+        updateFooter();
+        let [action, ...rest] = args.trim().split(/\s+/);
+        const temporary = action === "sessione";
+        if (temporary) {
+          [action, ...rest] = rest;
+          if (!mutableCommands.includes(action)) {
+            ctx.ui.notify("Uso: /voce sessione on | off | velocita <numero> | voce [lingua o nome] | elenco [filtro] | config | testo", "info");
+            return;
+          }
+        }
         if (!action) {
-          const last = [...ctx.sessionManager.getBranch()].reverse().find((entry) => entry.type === "message" &&
-            entry.message.role === "assistant" && entry.message.stopReason === "stop" &&
-            entry.message.content.some((part) => part.type === "text" && part.text.trim()));
-          if (last?.type === "message" && last.message.role === "assistant") {
-            await speak(last.message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n"), ctx);
-          } else ctx.ui.notify("Nessuna risposta da leggere nel ramo corrente.", "info");
+          const last = repliesInBranch(ctx.sessionManager.getBranch())[0];
+          if (last) await speak(last.text, ctx, settings, last.id);
+          else ctx.ui.notify("Nessuna risposta da leggere nel ramo corrente.", "info");
+        } else if (action === "risposte") {
+          const filter = rest.join(" ");
+          const replies = repliesInBranch(ctx.sessionManager.getBranch(), { filter, playingId: readingReplyId });
+          if (!replies.length) { ctx.ui.notify(filter ? "Nessuna risposta corrisponde al filtro nel ramo corrente." : "Nessuna risposta da leggere nel ramo corrente.", "info"); return; }
+          const selected = await ctx.ui.select(`Scegli una risposta da ascoltare (più recenti in alto)${filter ? ` — filtro: ${filter}` : ""}`, replies.map((reply) => reply.label));
+          const chosen = replies.find((reply) => reply.label === selected);
+          if (!chosen) return;
+          const current = repliesInBranch(ctx.sessionManager.getBranch()).find((reply) => reply.id === chosen.id);
+          if (current) await speak(current.text, ctx, settings, current.id);
+          else ctx.ui.notify("La risposta selezionata non è più nel ramo corrente.", "warning");
+        } else if (action === "salva") {
+          await saveSettings(configPath, settings);
+          saved = { ...settings };
+          await stop();
+          updateFooter();
+          ctx.ui.notify("Tutte le impostazioni correnti sono state salvate come predefinite.", "info");
+        } else if (action === "ripristina") {
+          const restored = await loadSettings(configPath);
+          await stop();
+          settings = restored;
+          saved = { ...restored };
+          updateFooter();
+          ctx.ui.notify("Preferenze salvate ripristinate; modifiche temporanee scartate.", "info");
         } else if (action === "status") {
-          ctx.ui.notify(`Lettura automatica ${settings.enabled ? "attiva" : "disattivata"}; voce: ${settings.voice}; lingua: ${languageLabel(settings.locale)}; velocità: ${settings.rate} parole/minuto. Codice: ${settings.readCode ? "leggi" : "ometti"}; URL: ${settings.readUrls ? "leggi" : "ometti"}; tabelle: ${settings.readTables ? "leggi" : "ometti"}. Audio condiviso: una lettura alla volta. Preferenze: ${configPath}`, "info");
+          saved = await loadSettings(configPath);
+          updateFooter();
+          const section = (title: string, values: Settings) => [
+            title,
+            `  Lettura automatica: ${values.enabled ? "attiva" : "disattivata"}`,
+            `  Voce: ${values.voice}`,
+            `  Lingua: ${languageLabel(values.locale)}`,
+            `  Velocità: ${values.rate} parole/minuto`,
+            `  Codice: ${values.readCode ? "leggi" : "ometti"}`,
+            `  URL: ${values.readUrls ? "leggi" : "ometti"}`,
+            `  Tabelle: ${values.readTables ? "leggi" : "ometti"}`,
+          ].join("\n");
+          ctx.ui.notify([
+            section("SESSIONE CORRENTE", settings),
+            section("PREDEFINITE SALVATE", saved),
+            [
+              "INFORMAZIONI",
+              `  Modifiche rispetto alle salvate: ${isTemporary() ? "sì (solo sessione)" : "nessuna"}`,
+              "  Audio condiviso: una lettura alla volta",
+              `  Scorciatoia stop: ${shortcut.key || "disabilitata"}`,
+              `  File preferenze:\n    ${configPath}`,
+            ].join("\n"),
+          ].join("\n\n"), "info");
         } else if (action === "anteprima") {
           await speak(undefined, ctx);
         } else if (action === "testo") {
-          await configureText(ctx);
+          await configureText(ctx, temporary);
         } else if (action === "velocita") {
           if (!rest.length) { ctx.ui.notify(`Velocità: ${settings.rate} parole/minuto.`, "info"); return; }
           const rate = Number(rest.join(" "));
           if (!validRate(rate)) { ctx.ui.notify("Specifica un numero intero tra 80 e 400 parole/minuto.", "warning"); return; }
-          await apply({ ...settings, rate });
-          ctx.ui.notify(`Velocità salvata: ${settings.rate} parole/minuto.`, "info");
+          await apply({ rate }, temporary);
+          ctx.ui.notify(`Velocità ${temporary ? "per questa sessione" : "salvata"}: ${settings.rate} parole/minuto.`, "info");
         } else if (action === "on" || action === "off") {
           if (action === "off") await stop();
-          await apply({ ...settings, enabled: action === "on" });
-          ctx.ui.notify(`Lettura automatica ${settings.enabled ? "attiva" : "disattivata"}; preferenza salvata.`, "info");
+          await apply({ enabled: action === "on" }, temporary);
+          ctx.ui.notify(`Lettura automatica ${settings.enabled ? "attiva" : "disattivata"}; ${temporary ? "solo per questa sessione" : "preferenza salvata"}.`, "info");
         } else if (action === "stop") {
           await stop();
           ctx.ui.notify("Lettura interrotta in questa sessione.", "info");
@@ -168,8 +271,8 @@ export default function (pi: ExtensionAPI) {
           } finally { await stop(); }
           const state = await ctx.ui.select(`Lettura automatica delle risposte (attuale: ${settings.enabled ? "attiva" : "disattivata"}; predefinita: disattivata)`, ["Disattiva", "Attiva"]);
           if (state !== "Attiva" && state !== "Disattiva") return;
-          await apply({ ...settings, voice: chosen.name, locale, rate, enabled: state === "Attiva" });
-          ctx.ui.notify(`Preferenze salvate: ${settings.voice}, ${settings.rate} parole/minuto; lettura automatica ${settings.enabled ? "attiva" : "disattivata"}.`, "info");
+          await apply({ voice: chosen.name, locale, rate, enabled: state === "Attiva" }, temporary);
+          ctx.ui.notify(`Preferenze ${temporary ? "per questa sessione" : "salvate"}: ${settings.voice}, ${settings.rate} parole/minuto; lettura automatica ${settings.enabled ? "attiva" : "disattivata"}.`, "info");
         } else if (action === "elenco" || action === "voce") {
           const voices = await listVoices();
           if (!voices.length) { ctx.ui.notify("Nessuna voce disponibile.", "warning"); return; }
@@ -193,11 +296,11 @@ export default function (pi: ExtensionAPI) {
             }
           }
           if (chosen) {
-            await apply({ ...settings, voice: chosen.name, locale: chosen.locale });
-            ctx.ui.notify(`Voce impostata: ${settings.voice}.`, "info");
+            await apply({ voice: chosen.name, locale: chosen.locale }, temporary);
+            ctx.ui.notify(`Voce impostata: ${settings.voice}${temporary ? " (solo questa sessione)" : ""}.`, "info");
           }
         } else {
-          ctx.ui.notify("Comandi: /voce | status | config | testo | on | off | stop | anteprima | velocita [80–400] | elenco [lingua o nome] | voce [lingua o nome]", "info");
+          ctx.ui.notify("Comandi: /voce | risposte | status | config | sessione <comando> | salva | ripristina | testo | on | off | stop | anteprima | velocita [80–400] | elenco [lingua o nome] | voce [lingua o nome]", "info");
         }
       } catch (error) {
         ctx.ui.notify(`Operazione vocale non riuscita: ${error instanceof Error ? error.message : String(error)}`, "error");

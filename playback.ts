@@ -7,7 +7,11 @@ export class SpeechPlayer {
   private current?: Playback;
   private generation = 0;
   private lockPath: string;
-  constructor(lockPath: string) { this.lockPath = lockPath; }
+  private onState: (voice: string | undefined, rate?: number) => void;
+  constructor(lockPath: string, onState: (voice: string | undefined, rate?: number) => void = () => {}) {
+    this.lockPath = lockPath;
+    this.onState = onState;
+  }
 
   private async stopCurrent() {
     const current = this.current;
@@ -26,11 +30,11 @@ export class SpeechPlayer {
   async play(text: string, voice: string, rate: number, notify: (message: string) => void) {
     const generation = ++this.generation;
     await this.stopCurrent();
-    if (generation !== this.generation || !text.trim()) return;
+    if (generation !== this.generation || !text.trim()) return false;
     const lease = acquireAudioLock(this.lockPath);
     if (!lease) {
       notify("Audio occupato da un'altra sessione Pi. Lettura non avviata; riprova con /voce quando ha finito.");
-      return;
+      return false;
     }
     let child: ChildProcessWithoutNullStreams;
     try { child = spawn("/usr/bin/say", ["-v", voice, "-r", String(rate)], { stdio: ["pipe", "pipe", "pipe"] }); }
@@ -46,13 +50,18 @@ export class SpeechPlayer {
     child.on("error", (err) => { failed = true; notify(`Lettura vocale: ${err.message}`); });
     child.on("close", (code, signal) => {
       lease.release();
-      if (this.current === playback) this.current = undefined;
+      if (this.current === playback) {
+        this.current = undefined;
+        this.onState(undefined);
+      }
       finish();
       if (!failed && !signal && code !== 0) notify(`Lettura vocale: ${error.trim() || `say è terminato con codice ${code}`}`);
     });
     try {
       if (child.pid) lease.setPlayer(child.pid);
       child.stdin.end(text);
+      this.onState(voice, rate);
+      return true;
     } catch (error) {
       await this.stopCurrent();
       throw error;
