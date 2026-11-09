@@ -35,13 +35,16 @@ Il pacchetto non è ancora pubblicato su npm.
 
 ## Utilizzo
 
-Dopo il caricamento, la lettura automatica è attiva con la voce **Alice**. Se quella voce non è presente sul tuo sistema, selezionane un'altra:
+Al primo utilizzo, la lettura automatica è attiva con la voce **Alice** e una velocità di **180 parole/minuto**. Ai successivi avvii vengono ripristinate le preferenze salvate. Se quella voce non è presente sul tuo sistema, selezionane un'altra:
 
 | Comando Pi | Effetto |
 | --- | --- |
 | `/voce` | Legge l'ultima risposta nel ramo corrente, anche se la lettura automatica è disattivata |
 | `/voce status` | Mostra lo stato della lettura automatica e la voce corrente |
-| `/voce config` | Seleziona lingua, voce e stato della lettura automatica |
+| `/voce config` | Configura lingua, voce, velocità, anteprima e lettura automatica |
+| `/voce anteprima` | Ascolta una frase di prova con voce e velocità correnti, anche con automatismo disattivato |
+| `/voce velocita` | Mostra la velocità corrente |
+| `/voce velocita 220` | Salva la velocità in parole/minuto (intero tra 80 e 400) |
 | `/voce on` | Attiva la lettura automatica |
 | `/voce off` | Disattiva la lettura e interrompe quella in corso |
 | `/voce stop` | Interrompe la lettura corrente senza disattivare le successive |
@@ -56,7 +59,26 @@ La completazione di Pi suggerisce i sottocomandi; dopo `/voce elenco ` propone i
 
 In `/voce config` premi Esc in qualsiasi passaggio per annullare senza modificare le impostazioni. `/voce` cerca nel ramo attivo anche dopo `/reload` o il ripristino di una sessione; ignora risposte incomplete e chiamate agli strumenti.
 
-La voce e lo stato on/off sono **temporanei**: a ogni riavvio, `/reload` o sostituzione della sessione tornano i valori iniziali. L'elenco proviene da `say -v ?`; le voci elencate dipendono dal sistema e potrebbero richiedere un download di macOS.
+### Preferenze persistenti
+
+Voce, lingua/regione, velocità e stato on/off vengono salvati automaticamente in `~/.pi/agent/pi-voce.json`. Se imposti `PI_CODING_AGENT_DIR`, il file risiede invece in quella directory. Il percorso effettivo compare in `/voce status`.
+
+Le modifiche valgono subito nella sessione corrente e sono ripristinate al riavvio o con `/reload`. Le altre sessioni già aperte non vengono aggiornate in tempo reale; se più sessioni salvano, prevale l'ultimo salvataggio. `/voce stop`, la lettura manuale e l'anteprima non modificano le preferenze. Se il file non è valido viene mostrato un avviso; un nuovo runtime usa i valori predefiniti, senza riscrivere il file finché non salvi nuove impostazioni.
+
+In `/voce config` scegli lingua, voce e velocità: il campo mostra la velocità predefinita (180 parole/minuto) e permette di mantenere quella corrente premendo Invio senza inserire testo. Poi puoi ascoltare l'anteprima più volte prima di continuare e scegliere se attivare la lettura automatica. Nessuna impostazione viene salvata fino all'ultima scelta. La frase di anteprima è in italiano anche se scegli una voce di un'altra lingua.
+
+L'elenco proviene da `say -v ?`; le voci elencate dipendono dal sistema e potrebbero richiedere un download di macOS.
+
+### Prova manuale in Pi
+
+1. Esegui `/reload`, poi `/voce config`.
+2. Scegli `it_IT`, una voce italiana, una velocità (es. `180`), quindi **Ascolta anteprima**.
+3. Dopo aver ascoltato, scegli **Continua** e **Disattiva**.
+4. Controlla `/voce status`, esegui `/reload` e ricontrolla lo stato: le impostazioni devono essere identiche.
+5. Usa `/voce` per ascoltare l'ultima risposta nonostante la lettura automatica disattivata.
+6. Prova `/voce velocita 220` e `/voce anteprima`; poi ripeti con `140` per confrontare.
+7. Apri `/voce config`, cambia qualche scelta e premi Esc: `/voce status` deve essere rimasto invariato.
+8. Con `/voce on`, invia un breve prompt a Pi e verifica la lettura automatica della risposta. Usa `/voce stop` per interromperla.
 
 ## Comportamento e limiti
 

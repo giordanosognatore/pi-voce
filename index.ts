@@ -1,10 +1,27 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-// macOS speech stays local. Settings last for this Pi runtime, not across /reload.
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { defaults, loadSettings, saveSettings, validRate, type Settings } from "./settings.ts";
+
+// Speech and preferences stay local to the machine running Pi.
 export default function (pi: ExtensionAPI) {
-  let enabled = true;
-  let voice = "Alice";
+  let { enabled, voice, locale, rate } = defaults;
+  const configPath = join(process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent"), "pi-voce.json");
+
+  async function apply(settings: Settings) {
+    await saveSettings(configPath, settings);
+    ({ enabled, voice, locale, rate } = settings);
+    stop();
+  }
+  function settings(): Settings { return { enabled, voice, locale, rate }; }
+  pi.on("session_start", async (_event, ctx) => {
+    try { ({ enabled, voice, locale, rate } = await loadSettings(configPath)); }
+    catch (error) {
+      ctx.ui.notify(`Preferenze vocali non caricate: ${error instanceof Error ? error.message : String(error)}`, "warning");
+    }
+  });
   let pending = "";
   let speaker: ChildProcessWithoutNullStreams | undefined;
 
@@ -14,10 +31,10 @@ export default function (pi: ExtensionAPI) {
     if (current && !current.killed) current.kill();
   }
 
-  function speak(text: string, ctx: ExtensionContext) {
+  function speak(text: string, ctx: ExtensionContext, selectedVoice = voice, selectedRate = rate) {
     stop();
     if (!text.trim()) return;
-    const child = spawn("/usr/bin/say", ["-v", voice], { stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn("/usr/bin/say", ["-v", selectedVoice, "-r", String(selectedRate)], { stdio: ["pipe", "pipe", "pipe"] });
     speaker = child;
     let error = "";
     child.stderr.on("data", (data) => { error += String(data).slice(0, 1000); });
@@ -72,10 +89,12 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.registerCommand("voce", {
-    description: "Leggi l'ultima risposta; status, config, on, off, stop, elenco [lingua o nome], voce [lingua o nome]",
+    description: "Leggi l'ultima risposta; status, config, on, off, stop, anteprima, velocita [80–400], elenco [lingua o nome], voce [lingua o nome]",
     getArgumentCompletions: async (prefix) => {
       const subcommands = [
         { value: "status", label: "status", description: "Mostra lo stato" },
+        { value: "anteprima", label: "anteprima", description: "Ascolta una frase di prova con la voce corrente" },
+        { value: "velocita", label: "velocita [80–400]", description: "Imposta parole al minuto oppure mostra la velocità" },
         { value: "config", label: "config", description: "Configura lingua, voce e lettura automatica" },
         { value: "on", label: "on", description: "Attiva lettura automatica" },
         { value: "off", label: "off", description: "Disattiva lettura automatica" },
@@ -107,6 +126,7 @@ export default function (pi: ExtensionAPI) {
       return matches.length ? matches : null;
     },
     handler: async (args, ctx) => {
+      try {
       const [action, ...rest] = args.trim().split(/\s+/);
       if (!action) {
         const entries = ctx.sessionManager.getBranch();
@@ -121,7 +141,15 @@ export default function (pi: ExtensionAPI) {
           ctx.ui.notify("Nessuna risposta da leggere nel ramo corrente.", "info");
         }
       } else if (action === "status") {
-        ctx.ui.notify(`Lettura automatica ${enabled ? "attiva" : "disattivata"}; voce: ${voice}.`, "info");
+        ctx.ui.notify(`Lettura automatica ${enabled ? "attiva" : "disattivata"}; voce: ${voice}; lingua: ${locale}; velocità: ${rate} parole/minuto. Preferenze: ${configPath}`, "info");
+      } else if (action === "anteprima") {
+        speak("Questa è una prova della voce selezionata per leggere le risposte di Pi.", ctx);
+      } else if (action === "velocita") {
+        if (!rest.length) { ctx.ui.notify(`Velocità: ${rate} parole/minuto.`, "info"); return; }
+        const value = Number(rest.join(" "));
+        if (!validRate(value)) { ctx.ui.notify("Specifica un numero intero tra 80 e 400 parole/minuto.", "warning"); return; }
+        await apply({ ...settings(), rate: value });
+        ctx.ui.notify(`Velocità salvata: ${rate} parole/minuto.`, "info");
       } else if (action === "config") {
         try {
           const voices = await listVoices();
@@ -136,22 +164,32 @@ export default function (pi: ExtensionAPI) {
           const selected = await ctx.ui.select("Scegli una voce (Esc per annullare)", choices.map((item) => item.label));
           const chosen = choices.find((item) => item.label === selected);
           if (!chosen) return;
+          const speed = await ctx.ui.input(`Velocità in parole/minuto (80–400; predefinita: ${defaults.rate}; Invio senza testo: ${rate})`, String(rate));
+          if (speed === undefined) return;
+          const selectedRate = speed.trim() === "" ? rate : Number(speed);
+          if (!validRate(selectedRate)) { ctx.ui.notify("Velocità non valida: usa un intero tra 80 e 400. Nessuna modifica applicata.", "warning"); return; }
+          try {
+            let next = await ctx.ui.select("Ascolta un'anteprima prima di continuare", ["Ascolta anteprima", "Continua"]);
+            while (next === "Ascolta anteprima") {
+              speak("Questa è una prova della voce selezionata per leggere le risposte di Pi.", ctx, chosen.name, selectedRate);
+              next = await ctx.ui.select("Anteprima in corso", ["Ascolta anteprima", "Continua"]);
+            }
+            if (next !== "Continua") return;
+          } finally { stop(); }
           const state = await ctx.ui.select("Lettura automatica delle risposte", ["Attiva", "Disattiva"]);
           if (state !== "Attiva" && state !== "Disattiva") return;
-          voice = chosen.name;
-          enabled = state === "Attiva";
-          if (!enabled) stop();
-          ctx.ui.notify(`Voce: ${voice}; lettura automatica ${enabled ? "attiva" : "disattivata"}.`, "info");
+          await apply({ voice: chosen.name, locale, rate: selectedRate, enabled: state === "Attiva" });
+          ctx.ui.notify(`Preferenze salvate: ${voice}, ${rate} parole/minuto; lettura automatica ${enabled ? "attiva" : "disattivata"}.`, "info");
         } catch (error) {
           ctx.ui.notify(`Impossibile configurare la voce: ${error instanceof Error ? error.message : String(error)}`, "error");
         }
       } else if (action === "on") {
-        enabled = true;
-        ctx.ui.notify(`Lettura vocale attiva (${voice}).`, "info");
+        await apply({ ...settings(), enabled: true });
+        ctx.ui.notify(`Lettura automatica attiva (${voice}); preferenza salvata.`, "info");
       } else if (action === "off") {
-        enabled = false;
         stop();
-        ctx.ui.notify("Lettura vocale disattivata per questa sessione.", "info");
+        await apply({ ...settings(), enabled: false });
+        ctx.ui.notify("Lettura automatica disattivata; preferenza salvata.", "info");
       } else if (action === "stop") {
         stop();
         ctx.ui.notify("Lettura interrotta.", "info");
@@ -165,7 +203,7 @@ export default function (pi: ExtensionAPI) {
             const selected = await ctx.ui.select("Voci disponibili — seleziona una voce (Esc per annullare)", voices.map((item) => item.label));
             const chosen = voices.find((item) => item.label === selected);
             if (chosen) {
-              voice = chosen.name;
+              await apply({ ...settings(), voice: chosen.name, locale: chosen.locale });
               ctx.ui.notify(`Voce impostata: ${voice}.`, "info");
             }
           }
@@ -185,7 +223,7 @@ export default function (pi: ExtensionAPI) {
           const direct = voices.find((item) => item.name.toLowerCase() === requestedName.toLowerCase() &&
             (!specifiedLocale || item.locale === specifiedLocale));
           if (direct) {
-            voice = direct.name;
+            await apply({ ...settings(), voice: direct.name, locale: direct.locale });
             ctx.ui.notify(`Voce impostata: ${voice}.`, "info");
             return;
           }
@@ -201,14 +239,17 @@ export default function (pi: ExtensionAPI) {
           const selected = await ctx.ui.select("Scegli una voce (Esc per annullare)", choices.map((item) => item.label));
           const chosen = choices.find((item) => item.label === selected);
           if (chosen) {
-            voice = chosen.name;
+            await apply({ ...settings(), voice: chosen.name, locale: chosen.locale });
             ctx.ui.notify(`Voce impostata: ${voice}.`, "info");
           }
         } catch (error) {
           ctx.ui.notify(`Impossibile scegliere la voce: ${error instanceof Error ? error.message : String(error)}`, "error");
         }
       } else {
-        ctx.ui.notify("Comandi: /voce | status | config | on | off | stop | elenco [lingua o nome] | voce [lingua o nome]", "info");
+        ctx.ui.notify("Comandi: /voce | status | config | on | off | stop | anteprima | velocita [80–400] | elenco [lingua o nome] | voce [lingua o nome]", "info");
+      }
+      } catch (error) {
+        ctx.ui.notify(`Preferenze vocali non salvate: ${error instanceof Error ? error.message : String(error)}`, "error");
       }
     },
   });
