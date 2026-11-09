@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.0
+
+- Lettura automatica disabilitata al primo utilizzo; le preferenze precedenti sono conservate.
+- Conversione Markdown migliorata: tabelle con intestazioni, elenchi, collegamenti, immagini, emoji e blocchi di codice.
+- `/voce testo` per configurare lettura di codice, URL e tabelle.
+- Coordinamento locale tra sessioni: una lettura alla volta, senza interrompere altre sessioni o accodare letture obsolete.
+- Recupero dei blocchi lasciati da processi terminati; attesa dell'uscita del lettore prima di liberare l'audio.
+- Lingue con nomi leggibili, voce corrente evidenziata, anteprime nella lingua della voce quando disponibili.
+- Voce di ripiego se quella configurata non è disponibile, senza sovrascrivere la preferenza salvata.
+- Test su processi separati per l'esclusione audio e test della conversione del testo.
+
 ## 0.2.0
 
 - Preferenze persistenti per voce, lingua/regione, lettura automatica e velocità.

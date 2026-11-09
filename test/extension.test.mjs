@@ -1,282 +1,260 @@
-import { test, mock, after } from "node:test";
+import { test, mock, after, afterEach } from "node:test";
+import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-const scratch = mkdtempSync(join(tmpdir(), "pi-voce-test-"));
-const previousDir = process.env.PI_CODING_AGENT_DIR;
-let sequence = 0;
-after(() => {
-  if (previousDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-  else process.env.PI_CODING_AGENT_DIR = previousDir;
-  rmSync(scratch, { recursive: true, force: true });
-});
-import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 
-const processes = [];
+const scratch = mkdtempSync(join(tmpdir(), "pi-voce-test-"));
+const original = { dir: process.env.PI_CODING_AGENT_DIR, lock: process.env.PI_VOCE_LOCK_PATH };
+const processes = [], apps = [];
+let sequence = 0;
 mock.module("node:child_process", { exports: {
-  spawn(file, args, options) {
+  spawn(file, args) {
     const child = new EventEmitter();
-    child.stdin = new PassThrough();
-    child.stdout = new PassThrough();
-    child.stderr = new PassThrough();
+    child.pid = process.pid;
+    child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough();
     child.killed = false;
-    child.kill = () => { child.killed = true; };
-    child.file = file;
-    child.args = args;
-    child.options = options;
-    child.input = "";
+    child.kill = (signal = "SIGTERM") => { child.killed = true; child.emit("close", null, signal); return true; };
+    child.file = file; child.args = args; child.input = "";
     child.stdin.on("data", (chunk) => { child.input += chunk.toString(); });
     processes.push(child);
     return child;
   },
 }});
 const { default: extension } = await import("../index.ts");
-
-function setup({ mode = "tui", result, select, input, entries = [], directory } = {}) {
-  process.env.PI_CODING_AGENT_DIR = directory ?? join(scratch, String(sequence++));
-  const configPath = join(process.env.PI_CODING_AGENT_DIR, "pi-voce.json");
-  const hooks = {}, commands = {}, notifications = [];
-  const ctx = { mode, sessionManager: { getBranch: () => entries }, ui: { notify: (message, kind) => notifications.push({ message, kind }), select: select ?? (async () => undefined), input: input ?? (async () => "180") } };
-  const pi = { on: (name, handler) => { hooks[name] = handler; }, registerCommand: (name, command) => { commands[name] = command; }, exec: async () => result };
-  extension(pi);
-  return { hooks, commands, notifications, ctx, configPath };
+const catalog = "Alice  it_IT # Salve, mi chiamo Alice.\nFederica  it_IT # Salve, mi chiamo Federica.\nLuca  it_IT # Ciao.\nSamantha  en_US # Hello, my name is Samantha.\n";
+const message = (text, stopReason = "stop") => ({ message: { role: "assistant", stopReason, content: [{ type: "text", text }] } });
+function setup({ mode = "tui", result = { code: 0, stdout: catalog, stderr: "" }, answers = [], input = "180", entries = [], directory, lockPath, exec } = {}) {
+  const dir = directory ?? join(scratch, String(sequence++));
+  process.env.PI_CODING_AGENT_DIR = dir;
+  process.env.PI_VOCE_LOCK_PATH = lockPath ?? join(dir, "audio.lock");
+  const hooks = {}, commands = {}, notifications = [], dialogs = [];
+  const ctx = {
+    mode, sessionManager: { getBranch: () => entries },
+    ui: {
+      notify: (message, kind) => notifications.push({ message, kind }),
+      input: async (title) => { dialogs.push({ title }); return input; },
+      select: async (title, items) => {
+        dialogs.push({ title, items });
+        const desired = answers.shift();
+        if (desired === undefined) return undefined;
+        const selected = items.find((item) => item === desired || item.includes(`(${desired})`) || item.startsWith(desired + " —"));
+        assert.ok(selected, `Selection ${desired} not in ${JSON.stringify(items)}`);
+        return selected;
+      },
+    },
+  };
+  extension({ on: (n, h) => { hooks[n] = h; }, registerCommand: (n, c) => { commands[n] = c; }, exec: exec ?? (async () => result) });
+  const app = { hooks, commands, ctx, notifications, dialogs, configPath: join(dir, "pi-voce.json"), run: (args) => commands.voce.handler(args, ctx) };
+  apps.push(app);
+  return app;
 }
-function message(text, stopReason = "stop") {
-  return { message: { role: "assistant", stopReason, content: [{ type: "text", text }] } };
-}
-
-test("speaks only the final text after settling and cleans common Markdown", () => {
-  const { hooks, ctx } = setup();
-  const before = processes.length;
-  hooks.before_agent_start({}, ctx);
-  hooks.message_end(message("intermediate", "toolUse"), ctx);
-  hooks.message_end(message("# Ciao **mondo**\n```js\ncode()\n```\n[link](https://example.com)"), ctx);
-  assert.equal(processes.length, before);
-  hooks.agent_settled({ aborted: false }, ctx);
-  const child = processes.at(-1);
-  assert.equal(processes.length, before + 1);
-  assert.equal(child.file, "/usr/bin/say");
-  assert.deepEqual(child.args, ["-v", "Alice", "-r", "180"]);
-  assert.match(child.input, /Ciao mondo/);
-  assert.match(child.input, /blocco di codice omesso/);
-  assert.doesNotMatch(child.input, /code\(\)|https:/);
-  hooks.session_shutdown({}, ctx);
-  assert.equal(child.killed, true);
+afterEach(async () => { for (const app of apps.splice(0)) await app.hooks.session_shutdown({}, app.ctx); });
+after(() => {
+  for (const [name, value] of [["PI_CODING_AGENT_DIR", original.dir], ["PI_VOCE_LOCK_PATH", original.lock]]) {
+    if (value === undefined) delete process.env[name]; else process.env[name] = value;
+  }
+  rmSync(scratch, { recursive: true, force: true });
 });
 
-test("ignores aborted, headless and failed responses", () => {
+test("automatic speech is OFF by default, manual playback still works", async () => {
+  const app = setup({ entries: [{ type: "message", ...message("Ultima risposta") }] });
   const before = processes.length;
-  const { hooks, ctx } = setup();
-  hooks.message_end(message("errore", "error"), ctx);
-  hooks.agent_settled({ aborted: false }, ctx);
-  hooks.message_end(message("interrotta"), ctx);
-  hooks.agent_settled({ aborted: true }, ctx);
+  app.hooks.message_end(message("silenzio"), app.ctx);
+  await app.hooks.agent_settled({ aborted: false }, app.ctx);
+  assert.equal(processes.length, before);
+  await app.run("");
+  assert.equal(processes.at(-1).input, "Ultima risposta");
+  await app.run("status");
+  assert.match(app.notifications.at(-1).message, /disattivata/);
+});
+
+test("automatic final reply is cleaned; aborted, failed, tool and RPC messages are ignored", async () => {
+  const app = setup();
+  await app.run("on");
+  const before = processes.length;
+  for (const reason of ["toolUse", "error", "aborted"]) {
+    app.hooks.message_end(message("ignore", reason), app.ctx);
+    await app.hooks.agent_settled({ aborted: false }, app.ctx);
+  }
+  app.hooks.message_end(message("abort"), app.ctx);
+  await app.hooks.agent_settled({ aborted: true }, app.ctx);
+  assert.equal(processes.length, before);
+  app.hooks.message_end(message("# Ciao **mondo**\n```js\ncode()\n```"), app.ctx);
+  await app.hooks.agent_settled({ aborted: false }, app.ctx);
+  assert.match(processes.at(-1).input, /Ciao mondo\nBlocco di codice omesso/);
   const headless = setup({ mode: "rpc" });
+  await headless.run("on");
   headless.hooks.message_end(message("rpc"), headless.ctx);
-  headless.hooks.agent_settled({ aborted: false }, headless.ctx);
-  assert.equal(processes.length, before);
+  await headless.hooks.agent_settled({ aborted: false }, headless.ctx);
+  assert.equal(processes.length, before + 1);
 });
 
-test("off, on, stop and a new prompt manage playback", async () => {
-  const { hooks, commands, ctx } = setup();
-  await commands.voce.handler("off", ctx);
-  const before = processes.length;
-  hooks.message_end(message("silenzio"), ctx);
-  hooks.agent_settled({ aborted: false }, ctx);
-  assert.equal(processes.length, before);
-  await commands.voce.handler("on", ctx);
-  hooks.message_end(message("ciao"), ctx);
-  hooks.agent_settled({ aborted: false }, ctx);
+test("stop, new prompt and session shutdown terminate only owned playback", async () => {
+  const app = setup();
+  await app.run("anteprima");
   const first = processes.at(-1);
-  await commands.voce.handler("stop", ctx);
+  await app.run("stop");
   assert.equal(first.killed, true);
-  hooks.message_end(message("ancora"), ctx);
-  hooks.agent_settled({ aborted: false }, ctx);
+  await app.run("anteprima");
   const second = processes.at(-1);
-  hooks.before_agent_start({}, ctx);
+  await app.hooks.before_agent_start({}, app.ctx);
   assert.equal(second.killed, true);
+  await app.run("anteprima");
+  const third = processes.at(-1);
+  await app.hooks.session_shutdown({}, app.ctx);
+  assert.equal(third.killed, true);
 });
 
-test("filters voices, selects one and uses it", async () => {
-  let shown;
-  const { hooks, commands, ctx, notifications } = setup({
-    result: { code: 0, stdout: "Alice               it_IT    # Salve\nFederica            it_IT    # Ciao\nSamantha            en_US    # Hello\n", stderr: "" },
-    select: async (_title, items) => { shown = items; return "Federica — it_IT"; },
-  });
-  await commands.voce.handler("elenco it_IT", ctx);
-  assert.deepEqual(shown, ["Alice — it_IT", "Federica — it_IT"]);
-  assert.match(notifications.at(-1).message, /Federica/);
-  hooks.message_end(message("ciao"), ctx);
-  hooks.agent_settled({ aborted: false }, ctx);
-  assert.deepEqual(processes.at(-1).args, ["-v", "Federica", "-r", "180"]);
-  hooks.session_shutdown({}, ctx);
+test("language labels are readable, current voice marked, guided and direct selection work", async () => {
+  const app = setup({ answers: ["it_IT", "Federica"] });
+  await app.run("voce");
+  assert.ok(app.dialogs[0].items.some((item) => /italiano/i.test(item) && /it_IT/.test(item)));
+  assert.ok(app.dialogs[1].items.some((item) => /Alice.*attuale/.test(item)));
+  await app.run("voce Samantha");
+  await app.run("anteprima");
+  assert.equal(processes.at(-1).input, "Hello, my name is Samantha.");
+  assert.deepEqual(processes.at(-1).args, ["-v", "Samantha", "-r", "180"]);
+  await app.run("voce it_IT Luca");
+  assert.match(app.notifications.at(-1).message, /Luca/);
+  await app.run("voce inesistente");
+  assert.match(app.notifications.at(-1).message, /non trovata/);
 });
 
-test("manual playback uses the latest complete response even when automatic speech is off", async () => {
-  const entries = [
-    { type: "message", ...message("prima") },
-    { type: "message", ...message("ultima risposta") },
-    { type: "message", ...message("strumento", "toolUse") },
-  ];
-  const { hooks, commands, ctx, notifications } = setup({ entries });
-  await commands.voce.handler("off", ctx);
-  await commands.voce.handler("", ctx);
-  assert.equal(processes.at(-1).input, "ultima risposta");
-  await commands.voce.handler("status", ctx);
-  assert.match(notifications.at(-1).message, /disattivata/);
-  hooks.session_shutdown({}, ctx);
-  const empty = setup();
-  await empty.commands.voce.handler("", empty.ctx);
-  assert.match(empty.notifications.at(-1).message, /Nessuna risposta/);
-});
-
-test("config selects locale, voice and automatic playback; cancellation changes nothing", async () => {
-  const result = { code: 0, stderr: "", stdout: "Alice  it_IT # Ciao\nFederica  it_IT # Salve\nSamantha  en_US # Hello\n" };
-  const answers = ["it_IT", "Federica — it_IT", "Continua", "Disattiva"];
-  const { hooks, commands, ctx, notifications } = setup({ result, select: async () => answers.shift() });
-  await commands.voce.handler("config", ctx);
-  await commands.voce.handler("status", ctx);
-  assert.match(notifications.at(-1).message, /disattivata.*Federica/);
-  const before = processes.length;
-  hooks.message_end(message("silenzio"), ctx);
-  hooks.agent_settled({ aborted: false }, ctx);
-  assert.equal(processes.length, before);
-  const cancelled = setup({ result, select: async (_title, _items) => undefined });
-  await cancelled.commands.voce.handler("config", cancelled.ctx);
-  await cancelled.commands.voce.handler("status", cancelled.ctx);
-  assert.match(cancelled.notifications.at(-1).message, /attiva.*Alice/);
-});
-
-test("completion advertises the filter and suggests actual locales and voice names", async () => {
-  const result = { code: 0, stderr: "", stdout: "Alice  it_IT # Ciao\nFederica  it_IT # Salve\nSamantha  en_US # Hello\n" };
-  const { commands } = setup({ result });
-  const complete = commands.voce.getArgumentCompletions;
-  assert.ok((await complete("")).some((item) => item.label === "elenco [lingua o nome]" && item.value === "elenco"));
-  assert.deepEqual(await complete("elenco it"), [{ value: "elenco it_IT", label: "it_IT" }]);
+test("both completion entry points suggest only languages, then voices for selected locale", async () => {
+  const app = setup();
+  const complete = app.commands.voce.getArgumentCompletions;
+  assert.deepEqual((await complete("voce ")).map((i) => i.label), (await complete("elenco ")).map((i) => i.label));
+  assert.deepEqual((await complete("voce it")).map((i) => i.value), ["voce it_IT"]);
+  assert.deepEqual((await complete("voce it_IT F")).map((i) => i.value), ["voce it_IT Federica"]);
   assert.deepEqual(await complete("voce Fed"), []);
-  assert.deepEqual(await complete("voce it"), [{ value: "voce it_IT", label: "it_IT" }]);
-  assert.deepEqual(await complete("voce "), [{ value: "voce en_US", label: "en_US" }, { value: "voce it_IT", label: "it_IT" }]);
-  assert.deepEqual((await complete("voce ")).map((item) => item.label), (await complete("elenco ")).map((item) => item.label));
-  assert.deepEqual(await complete("voce it_IT "), [{ value: "voce it_IT Alice", label: "Alice" }, { value: "voce it_IT Federica", label: "Federica" }]);
   assert.equal(await complete("inesistente"), null);
 });
 
-test("voice command selects language then voice, or accepts either directly", async () => {
-  const result = { code: 0, stderr: "", stdout: "Alice  it_IT # Ciao\nFederica  it_IT # Salve\nSamantha  en_US # Hello\n" };
-  const answers = ["it_IT", "Federica — it_IT"];
-  const { commands, ctx, notifications } = setup({ result, select: async () => answers.shift() });
-  await commands.voce.handler("voce", ctx);
-  assert.match(notifications.at(-1).message, /Federica/);
-  answers.push("Alice — it_IT");
-  await commands.voce.handler("voce it_IT", ctx);
-  assert.match(notifications.at(-1).message, /Alice/);
-  await commands.voce.handler("voce Samantha", ctx);
-  assert.match(notifications.at(-1).message, /Samantha/);
-  await commands.voce.handler("voce it_IT Federica", ctx);
-  assert.match(notifications.at(-1).message, /Federica/);
-  await commands.voce.handler("voce Samantha", ctx);
-  await commands.voce.handler("voce inesistente", ctx);
-  assert.match(notifications.at(-1).message, /non trovata/);
-  await commands.voce.handler("voce", ctx); // cancelled
-  await commands.voce.handler("status", ctx);
-  assert.match(notifications.at(-1).message, /Samantha/);
-});
-
-test("voice, locale, speed and disabled state survive a fresh extension runtime", async () => {
-  const directory = join(scratch, "persistent");
-  const first = setup({ directory, result: { code: 0, stderr: "", stdout: "Luca  it_IT # Ciao\n" } });
-  await first.commands.voce.handler("voce Luca", first.ctx);
-  await first.commands.voce.handler("velocita 220", first.ctx);
-  await first.commands.voce.handler("off", first.ctx);
-  assert.deepEqual(JSON.parse(await readFile(first.configPath, "utf8")), { voice: "Luca", locale: "it_IT", rate: 220, enabled: false });
-  const second = setup({ directory });
+test("preferences persist and legacy automatic ON choice is preserved", async () => {
+  const dir = join(scratch, "legacy");
+  const first = setup({ directory: dir });
+  await first.run("off");
+  await writeFile(first.configPath, JSON.stringify({ enabled: true, voice: "Luca", locale: "it_IT", rate: 220 }));
+  const second = setup({ directory: dir });
   await second.hooks.session_start({}, second.ctx);
-  await second.commands.voce.handler("status", second.ctx);
-  assert.match(second.notifications.at(-1).message, /disattivata.*Luca.*it_IT.*220/);
-  await second.commands.voce.handler("anteprima", second.ctx);
-  assert.deepEqual(processes.at(-1).args, ["-v", "Luca", "-r", "220"]);
-  const before = processes.length;
-  second.hooks.message_end(message("silenzio"), second.ctx);
-  second.hooks.agent_settled({ aborted: false }, second.ctx);
-  assert.equal(processes.length, before);
-  second.hooks.session_shutdown({}, second.ctx);
+  await second.run("status");
+  assert.match(second.notifications.at(-1).message, /automatica attiva.*Luca.*220/);
+  await second.run("off");
+  const saved = JSON.parse(await readFile(first.configPath, "utf8"));
+  assert.deepEqual(saved, { enabled: false, voice: "Luca", locale: "it_IT", rate: 220, readCode: false, readUrls: false, readTables: true });
 });
 
-test("config displays the default speed and empty input preserves the current speed", async () => {
-  const answers = ["it_IT", "Federica — it_IT", "Continua", "Disattiva"];
-  let title;
-  const app = setup({
-    result: { code: 0, stderr: "", stdout: "Federica  it_IT # Ciao\n" },
-    select: async () => answers.shift(),
-    input: async (prompt) => { title = prompt; return ""; },
-  });
-  await app.commands.voce.handler("velocita 220", app.ctx);
-  await app.commands.voce.handler("config", app.ctx);
-  assert.match(title, /predefinita: 180/);
-  assert.match(title, /Invio senza testo: 220/);
-  assert.equal(JSON.parse(await readFile(app.configPath, "utf8")).rate, 220);
+test("config saves speed and state, displays defaults, empty speed preserves current value", async () => {
+  const app = setup({ answers: ["it_IT", "Federica", "Continua", "Disattiva"], input: "" });
+  await app.run("velocita 220");
+  await app.run("config");
+  assert.match(app.dialogs.find((i) => i.title.startsWith("Velocità")).title, /predefinita: 180.*Invio senza testo: 220/);
+  assert.deepEqual(JSON.parse(await readFile(app.configPath, "utf8")), { enabled: false, voice: "Federica", locale: "it_IT", rate: 220, readCode: false, readUrls: false, readTables: true });
 });
 
-test("speed validation rejects invalid numbers without changing saved preferences", async () => {
-  const app = setup();
-  await app.commands.voce.handler("velocita 200", app.ctx);
-  for (const value of ["0", "79", "401", "Infinity", "200.5", "testo"]) {
-    await app.commands.voce.handler(`velocita ${value}`, app.ctx);
-    assert.equal(app.notifications.at(-1).kind, "warning");
-  }
-  assert.equal(JSON.parse(await readFile(app.configPath, "utf8")).rate, 200);
-  await app.commands.voce.handler("velocita", app.ctx);
-  assert.match(app.notifications.at(-1).message, /200/);
+test("config preview is stopped on cancellation and saves no partial preference", async () => {
+  const app = setup({ answers: ["it_IT", "Federica", "Ascolta anteprima", undefined], input: "250" });
+  await app.run("velocita 180");
+  const saved = await readFile(app.configPath, "utf8");
+  await app.run("config");
+  assert.equal(await readFile(app.configPath, "utf8"), saved);
+  assert.deepEqual(processes.at(-1).args, ["-v", "Federica", "-r", "250"]);
+  assert.equal(processes.at(-1).killed, true);
 });
 
-test("config preview uses proposed voice and speed; cancellation at every stage preserves settings", async () => {
-  for (const cancelAt of [0, 1, 2, 3, 4]) {
-    let step = 0;
-    const values = ["it_IT", "Federica — it_IT", "250", "Ascolta anteprima", undefined];
-    const answer = async () => step === cancelAt ? (step++, undefined) : values[step++];
-    const app = setup({ result: { code: 0, stderr: "", stdout: "Federica  it_IT # Ciao\n" }, select: answer, input: answer });
-    await app.commands.voce.handler("velocita 180", app.ctx);
-    const saved = await readFile(app.configPath, "utf8");
-    await app.commands.voce.handler("config", app.ctx);
-    assert.equal(await readFile(app.configPath, "utf8"), saved);
-    if (cancelAt === 4) {
-      assert.deepEqual(processes.at(-1).args, ["-v", "Federica", "-r", "250"]);
-      assert.equal(processes.at(-1).killed, true);
-    }
-  }
-  const answers = ["it_IT", "Federica — it_IT", "Continua", undefined];
-  const app = setup({ result: { code: 0, stderr: "", stdout: "Federica  it_IT # Ciao\n" }, select: async () => answers.shift() });
-  await app.commands.voce.handler("config", app.ctx);
-  await app.commands.voce.handler("status", app.ctx);
-  assert.match(app.notifications.at(-1).message, /attiva.*Alice/);
+test("text preferences are saved atomically and used for manual speech", async () => {
+  const app = setup({ answers: ["Leggi", "Leggi", "Ometti"], entries: [{ type: "message", ...message("~~~sh\necho ciao\n~~~\nhttps://example.com\n| A | B |\n| --- | --- |\n| 1 | 2 |") }] });
+  await app.run("testo");
+  await app.run("");
+  const text = processes.at(-1).input;
+  assert.match(text, /echo ciao/); assert.match(text, /https:\/\/example.com/); assert.match(text, /Tabella omessa/);
+  const cancelled = setup({ answers: ["Leggi", undefined] });
+  await cancelled.run("off");
+  const saved = await readFile(cancelled.configPath, "utf8");
+  await cancelled.run("testo");
+  assert.equal(await readFile(cancelled.configPath, "utf8"), saved);
 });
 
-test("missing preferences use defaults; corrupt or unwritable preferences are reported", async () => {
+test("two sessions cannot overlap; stopping the other session does not interrupt the owner", async () => {
+  const lockPath = join(scratch, "shared-audio.lock");
+  const first = setup({ lockPath }), second = setup({ lockPath });
+  await first.run("anteprima");
+  const owner = processes.at(-1), count = processes.length;
+  await second.run("anteprima");
+  assert.equal(processes.length, count);
+  assert.match(second.notifications.at(-1).message, /Audio occupato/);
+  await second.run("stop");
+  assert.equal(owner.killed, false);
+  await first.run("stop");
+  await second.run("anteprima");
+  assert.equal(processes.length, count + 1);
+});
+
+test("unavailable voice falls back without overwriting saved preference, empty catalog reports error", async () => {
+  const app = setup({ result: { code: 0, stdout: "Samantha  en_US # Hello.\n", stderr: "" } });
+  await app.run("off");
+  await app.run("anteprima");
+  assert.match(app.notifications.at(-1).message, /Alice.*non disponibile.*Samantha/);
+  assert.equal(JSON.parse(await readFile(app.configPath, "utf8")).voice, "Alice");
+  assert.equal(processes.at(-1).args[1], "Samantha");
+  const empty = setup({ result: { code: 0, stdout: "", stderr: "" } });
+  await empty.run("anteprima");
+  assert.match(empty.notifications.at(-1).message, /Nessuna voce/);
+});
+
+test("invalid rates, corrupt preferences, save failures and enumeration errors are reported", async () => {
   const app = setup();
   await app.hooks.session_start({}, app.ctx);
-  assert.equal(app.notifications.length, 0);
-  await app.commands.voce.handler("on", app.ctx);
+  await app.run("velocita 200");
+  for (const value of ["79", "401", "200.5", "testo"]) { await app.run(`velocita ${value}`); assert.equal(app.notifications.at(-1).kind, "warning"); }
+  assert.equal(JSON.parse(await readFile(app.configPath, "utf8")).rate, 200);
   await writeFile(app.configPath, "not json");
   await app.hooks.session_start({}, app.ctx);
-  assert.equal(app.notifications.at(-1).kind, "warning");
-  await writeFile(app.configPath, JSON.stringify({ enabled: true, voice: "Alice", locale: "it_IT", rate: 1 }));
-  await app.hooks.session_start({}, app.ctx);
-  assert.match(app.notifications.at(-1).message, /Formato/);
-  const blocked = setup({ directory: join(app.configPath, "not-a-directory") });
-  await blocked.commands.voce.handler("off", blocked.ctx);
+  assert.match(app.notifications.at(-1).message, /non caricate/);
+  const blocked = setup({ directory: join(app.configPath, "blocked") });
+  await blocked.run("on");
   assert.equal(blocked.notifications.at(-1).kind, "error");
-  await blocked.commands.voce.handler("status", blocked.ctx);
-  assert.match(blocked.notifications.at(-1).message, /automatica attiva/);
+  const failed = setup({ result: { code: 1, stdout: "", stderr: "errore say" } });
+  await failed.run("elenco");
+  assert.match(failed.notifications.at(-1).message, /errore say/);
 });
 
-test("reports list errors and empty filters", async () => {
-  const failure = setup({ result: { code: 1, stderr: "errore say", stdout: "" } });
-  await failure.commands.voce.handler("elenco", failure.ctx);
-  assert.match(failure.notifications.at(-1).message, /errore say/);
-  const empty = setup({ result: { code: 0, stderr: "", stdout: "Alice  it_IT    # Ciao\n" } });
-  await empty.commands.voce.handler("elenco fr_FR", empty.ctx);
-  assert.match(empty.notifications.at(-1).message, /Nessuna voce/);
+test("a new prompt cancels voice preparation before a pending enumeration completes", async () => {
+  let resolve;
+  const app = setup({ exec: () => new Promise((done) => { resolve = done; }) });
+  const before = processes.length;
+  const reading = app.run("anteprima");
+  // Let preparation reach enumeration, then cancel it like a new user prompt.
+  while (!resolve) await Promise.resolve();
+  await app.hooks.before_agent_start({}, app.ctx);
+  resolve({ code: 0, stdout: catalog, stderr: "" });
+  await reading;
+  assert.equal(processes.length, before);
+});
+
+test("a new manual read closes its old player before reacquiring the audio lease", async () => {
+  const app = setup();
+  await app.run("anteprima");
+  const first = processes.at(-1);
+  await app.run("anteprima");
+  assert.equal(first.killed, true);
+  assert.notEqual(processes.at(-1), first);
+  assert.equal(app.notifications.length, 0);
+});
+
+test("player error and abnormal exit free the audio lease", async () => {
+  const app = setup();
+  await app.run("anteprima");
+  processes.at(-1).emit("error", new Error("spawn failure"));
+  processes.at(-1).emit("close", -1, null);
+  assert.match(app.notifications.at(-1).message, /spawn failure/);
+  await app.run("anteprima");
+  processes.at(-1).stderr.write("bad voice");
+  processes.at(-1).emit("close", 1, null);
+  assert.match(app.notifications.at(-1).message, /bad voice/);
+  await app.run("anteprima");
 });

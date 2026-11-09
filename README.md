@@ -1,14 +1,14 @@
 # Pi Voce
 
-Estensione per [Pi](https://pi.dev/) che legge ad alta voce le risposte finali tramite il comando `say` di macOS. La sintesi avviene sul Mac, senza servizi vocali esterni o modelli aggiuntivi.
+Estensione per [Pi](https://pi.dev/) che legge ad alta voce le risposte finali tramite `say` di macOS. Sintesi locale, senza servizi vocali esterni o modelli aggiuntivi.
 
 ## Requisiti
 
 - macOS con `/usr/bin/say` e almeno una voce disponibile.
-- Pi coding agent con supporto agli eventi `agent_settled` e `message_end`; provato con Pi 1.5.0.
+- Pi coding agent con gli eventi `agent_settled` e `message_end`; sviluppo e prove con Pi 1.5.0.
 - Un dispositivo di uscita audio funzionante.
 
-Sviluppata su **macOS Monterey 12.7.6, Intel**. Altre configurazioni macOS non sono state verificate. L'estensione non supporta Linux o Windows: usa il comando `say` di macOS.
+Sviluppata su **macOS Monterey 12.7.6, Intel**. Altre configurazioni macOS non sono state verificate. Linux e Windows non sono supportati.
 
 ## Installazione da GitHub
 
@@ -16,16 +16,14 @@ Sviluppata su **macOS Monterey 12.7.6, Intel**. Altre configurazioni macOS non s
 pi install git:github.com/giordanosognatore/pi-voce
 ```
 
-In una sessione Pi già aperta esegui `/reload`. Per aggiornare o rimuovere:
+In una sessione già aperta esegui `/reload`. Per aggiornare o rimuovere:
 
 ```bash
 pi update git:github.com/giordanosognatore/pi-voce
 pi remove git:github.com/giordanosognatore/pi-voce
 ```
 
-Non installare contemporaneamente una copia manuale della stessa estensione: le due copie potrebbero registrare lo stesso comando e leggere le risposte due volte.
-
-Per provarla senza installazione permanente, da una copia locale:
+Non caricare contemporaneamente una copia manuale e una installata del pacchetto: potrebbero registrare lo stesso comando. Per una prova da una copia locale, dalla directory superiore:
 
 ```bash
 pi -e ./pi-voce
@@ -35,66 +33,99 @@ Il pacchetto non è ancora pubblicato su npm.
 
 ## Utilizzo
 
-Al primo utilizzo, la lettura automatica è attiva con la voce **Alice** e una velocità di **180 parole/minuto**. Ai successivi avvii vengono ripristinate le preferenze salvate. Se quella voce non è presente sul tuo sistema, selezionane un'altra:
+**Al primo utilizzo la lettura automatica è disabilitata.** La voce preferita iniziale è Alice, lingua `it_IT`, velocità 180 parole/minuto. Le preferenze esistenti, incluso l'eventuale automatismo attivo delle versioni precedenti, vengono conservate.
 
 | Comando Pi | Effetto |
 | --- | --- |
-| `/voce` | Legge l'ultima risposta nel ramo corrente, anche se la lettura automatica è disattivata |
-| `/voce status` | Mostra lo stato della lettura automatica e la voce corrente |
+| `/voce` | Legge l'ultima risposta del ramo corrente, anche con automatismo disattivato |
+| `/voce status` | Mostra voce, lingua, velocità, automatismo, opzioni del testo e percorso delle preferenze |
 | `/voce config` | Configura lingua, voce, velocità, anteprima e lettura automatica |
-| `/voce anteprima` | Ascolta una frase di prova con voce e velocità correnti, anche con automatismo disattivato |
+| `/voce testo` | Sceglie se leggere blocchi di codice, indirizzi web e tabelle |
+| `/voce anteprima` | Ascolta una frase di prova con voce e velocità correnti |
 | `/voce velocita` | Mostra la velocità corrente |
 | `/voce velocita 220` | Salva la velocità in parole/minuto (intero tra 80 e 400) |
-| `/voce on` | Attiva la lettura automatica |
-| `/voce off` | Disattiva la lettura e interrompe quella in corso |
-| `/voce stop` | Interrompe la lettura corrente senza disattivare le successive |
+| `/voce on` | Attiva e salva la lettura automatica |
+| `/voce off` | Disattiva l'automatismo e interrompe la lettura di questa sessione |
+| `/voce stop` | Interrompe solo questa sessione, senza modificare le preferenze |
 | `/voce elenco` | Mostra le voci e permette di selezionarne una |
-| `/voce elenco it_IT` | Filtra l'elenco per lingua o nome |
-| `/voce voce` | Scegli prima la lingua e poi la voce |
+| `/voce elenco it_IT` | Filtra l'elenco per lingua o nome; funziona anche con `italiano` o `Federica` |
+| `/voce voce` | Sceglie prima la lingua e poi la voce |
 | `/voce voce it_IT` | Mostra le voci della lingua indicata |
 | `/voce voce it_IT Federica` | Imposta una voce della lingua indicata |
-| `/voce voce Federica` | Imposta una voce per nome |
+| `/voce voce Federica` | Imposta direttamente una voce per nome |
 
-La completazione di Pi suggerisce i sottocomandi; dopo `/voce elenco ` propone i codici lingua disponibili e dopo `/voce voce ` prima i codici lingua e, dopo il codice e uno spazio, le voci di quella lingua. È anche possibile digitare direttamente il nome di una voce.
+I selettori mostrano il nome leggibile della lingua (es. **italiano (Italia)**), il codice e l'indicazione **✓ attuale**. Nella completazione, `/voce elenco ` e `/voce voce ` propongono prima le lingue; dopo `/voce voce it_IT ` compaiono solo le voci italiane. Il valore inserito resta il codice, così i comandi sono riproducibili.
 
-In `/voce config` premi Esc in qualsiasi passaggio per annullare senza modificare le impostazioni. `/voce` cerca nel ramo attivo anche dopo `/reload` o il ripristino di una sessione; ignora risposte incomplete e chiamate agli strumenti.
+In `/voce config` il campo velocità indica la predefinita (180 parole/minuto); Invio senza testo mantiene quella corrente. Puoi ascoltare l'anteprima più volte prima di continuare. Viene usata la frase dimostrativa della voce fornita da macOS, quando disponibile, altrimenti una frase italiana.
 
-### Preferenze persistenti
+**Esc annulla senza modifiche parziali** sia `/voce config` sia `/voce testo`. Le opzioni del testo sono configurate separatamente per non allungare il percorso di selezione della voce.
 
-Voce, lingua/regione, velocità e stato on/off vengono salvati automaticamente in `~/.pi/agent/pi-voce.json`. Se imposti `PI_CODING_AGENT_DIR`, il file risiede invece in quella directory. Il percorso effettivo compare in `/voce status`.
+### Voce non disponibile
 
-Le modifiche valgono subito nella sessione corrente e sono ripristinate al riavvio o con `/reload`. Le altre sessioni già aperte non vengono aggiornate in tempo reale; se più sessioni salvano, prevale l'ultimo salvataggio. `/voce stop`, la lettura manuale e l'anteprima non modificano le preferenze. Se il file non è valido viene mostrato un avviso; un nuovo runtime usa i valori predefiniti, senza riscrivere il file finché non salvi nuove impostazioni.
+Se la voce preferita manca, per quella lettura Pi Voce cerca nell'ordine:
 
-In `/voce config` scegli lingua, voce e velocità: il campo mostra la velocità predefinita (180 parole/minuto) e permette di mantenere quella corrente premendo Invio senza inserire testo. Poi puoi ascoltare l'anteprima più volte prima di continuare e scegliere se attivare la lettura automatica. Nessuna impostazione viene salvata fino all'ultima scelta. La frase di anteprima è in italiano anche se scegli una voce di un'altra lingua.
+1. un'altra voce della stessa lingua/regione;
+2. una voce della stessa lingua in un'altra regione;
+3. la prima voce restituita da macOS.
 
-L'elenco proviene da `say -v ?`; le voci elencate dipendono dal sistema e potrebbero richiedere un download di macOS.
+Mostra un avviso e **non sovrascrive la preferenza salvata**. Usa `/voce config` per modificarla definitivamente. Se il sistema non restituisce nessuna voce, la lettura non viene avviata. L'elenco di `say -v ?` dipende dal Mac; alcune voci elencate potrebbero richiedere un download di macOS o non essere effettivamente riproducibili: in quel caso viene segnalato l'errore di `say`.
 
-### Prova manuale in Pi
+## Testo da ascoltare
 
-1. Esegui `/reload`, poi `/voce config`.
-2. Scegli `it_IT`, una voce italiana, una velocità (es. `180`), quindi **Ascolta anteprima**.
-3. Dopo aver ascoltato, scegli **Continua** e **Disattiva**.
-4. Controlla `/voce status`, esegui `/reload` e ricontrolla lo stato: le impostazioni devono essere identiche.
-5. Usa `/voce` per ascoltare l'ultima risposta nonostante la lettura automatica disattivata.
-6. Prova `/voce velocita 220` e `/voce anteprima`; poi ripeti con `140` per confrontare.
-7. Apri `/voce config`, cambia qualche scelta e premi Esc: `/voce status` deve essere rimasto invariato.
-8. Con `/voce on`, invia un breve prompt a Pi e verifica la lettura automatica della risposta. Usa `/voce stop` per interromperla.
+Valori iniziali:
 
-## Comportamento e limiti
+- **Blocchi di codice: omessi**, con annuncio «Blocco di codice omesso». Gestisce delimitatori a backtick, tilde e codice indentato. I nomi tecnici nel codice inline vengono mantenuti.
+- **Indirizzi web: omessi**. Per i link resta il testo descrittivo; gli URL isolati diventano «collegamento omesso».
+- **Tabelle: lette** riga per riga con i nomi delle colonne, anziché leggere barre e separatori. Puoi ometterle con un singolo annuncio.
 
-- Legge la risposta finale quando Pi ha terminato il lavoro, solo nella modalità interattiva TUI. Non legge risultati degli strumenti, ragionamenti o risposte interrotte.
-- I blocchi di codice delimitati da tripli apici inversi vengono sostituiti con «blocco di codice omesso»; la conversione del Markdown è semplice e non copre ogni formato.
-- Un nuovo prompt, `/voce stop`, `/voce off` o la chiusura della sessione interrompono la lettura in corso.
-- Può funzionare in Pi eseguito dentro Herdr, purché l'audio sia disponibile sulla macchina che esegue Pi. Ogni sessione Pi interattiva carica l'estensione indipendentemente: sessioni parallele possono parlare contemporaneamente.
-- La sintesi è locale; il testo della conversazione può comunque essere inviato al provider del modello configurato in Pi.
+`/voce testo` cambia queste tre preferenze; valgono per la lettura manuale e automatica e vengono salvate insieme alle altre impostazioni. Intestazioni, elenchi, checkbox, formattazione comune, immagini e collegamenti vengono ripuliti. Le emoji vengono rimosse. I comandi vocali incorporati `[[...]]` non vengono eseguiti come istruzioni di `say`.
+
+La conversione è intenzionalmente semplice, **non un parser Markdown completo**: tabelle complesse, annidamenti, LaTeX e codice tecnico possono non essere resi perfettamente. Il testo della risposta originale in Pi non viene modificato. Non vengono generati riassunti o richieste aggiuntive al modello.
+
+## Una lettura alla volta tra sessioni
+
+Le copie aggiornate di Pi Voce, in esecuzione sullo stesso Mac con lo stesso utente, condividono un blocco audio in `~/.pi/pi-voce-audio.lock`, anche se usano directory di configurazione Pi diverse.
+
+- Se un'altra sessione sta leggendo, la richiesta non viene avviata e compare un avviso. **Non viene accodata**: per ascoltare la risposta in seguito, riprova con `/voce`.
+- Un nuovo prompt, `/voce stop`, `/voce off` e la chiusura della sessione interrompono solo il lettore posseduto da quella sessione.
+- Prima di liberare l'audio si attende la chiusura del processo `say`.
+- Se il proprietario è terminato, il blocco viene recuperato alla richiesta successiva, purché non risulti ancora attivo il suo lettore. Metadati non validi sono trattati prudentemente come audio occupato.
+
+Il coordinamento riguarda solo Pi Voce aggiornato, non altri programmi audio o comandi `say` eseguiti separatamente. Per test isolati si può impostare `PI_VOCE_LOCK_PATH` a un percorso diverso: tutte le sessioni che devono coordinarsi devono usare lo stesso percorso. Non cancellare manualmente il blocco mentre una sessione sta leggendo.
+
+## Preferenze persistenti
+
+Voce, lingua/regione, velocità, automatismo e opzioni del testo vengono salvati in `~/.pi/agent/pi-voce.json`. Con `PI_CODING_AGENT_DIR` il file risiede in quella directory. `/voce status` mostra il percorso effettivo.
+
+Le modifiche valgono subito nella sessione corrente e sono ripristinate al riavvio o con `/reload`. Le altre sessioni già aperte non si aggiornano in tempo reale; se più sessioni salvano, prevale l'ultimo salvataggio. Le anteprime e `/voce stop` non modificano le preferenze.
+
+I file di preferenze della versione 0.2 vengono letti conservando tutti i valori esistenti e aggiungendo i valori iniziali delle opzioni del testo. Un file non valido produce un avviso; un nuovo runtime usa le impostazioni iniziali e non riscrive il file finché non salvi nuove scelte.
+
+## Prova manuale in Pi
+
+1. Esegui `/reload` e `/voce status`. Per provare la modalità manuale usa `/voce off` (le preferenze precedenti non vengono sovrascritte automaticamente).
+2. Apri `/voce config`: scegli una lingua dal nome leggibile, poi una voce; quella corrente ha il segno ✓. Prova l'anteprima e salva con **Disattiva**.
+3. Esegui `/reload` e verifica con `/voce status` che le scelte siano state mantenute.
+4. Chiedi a Pi una breve risposta con un elenco, un link, una tabella e un blocco di codice. Esegui `/voce`: dovresti sentire la tabella con intestazioni, senza codice e senza l'URL.
+5. Cambia le opzioni con `/voce testo` e ripeti `/voce` per confrontare. Prova anche Esc per controllare che non vengano salvate modifiche parziali.
+6. Apri una seconda sessione Pi aggiornata. Avvia una risposta abbastanza lunga con `/voce` nella prima, poi `/voce anteprima` nella seconda: deve comparire «Audio occupato», senza voci sovrapposte.
+7. `/voce stop` nella seconda non deve interrompere la prima. Dopo aver fermato la prima, l'anteprima della seconda deve funzionare.
+8. Con `/voce on`, invia un breve prompt e verifica la lettura automatica. Con `/voce off` torna alla sola lettura manuale.
+
+## Privacy e limiti
+
+La sintesi è locale; la conversazione può comunque essere inviata al provider configurato in Pi. L'estensione non legge risultati degli strumenti, ragionamenti o risposte interrotte e non esegue letture automatiche nelle modalità non interattive. `/voce` cerca la risposta nel ramo attivo anche dopo `/reload` o il ripristino di una sessione.
+
+Con Herdr, l'audio viene riprodotto sulla macchina che esegue Pi. Non viene inoltrato via SSH al terminale locale.
 
 ## Sviluppo e test
 
 ```bash
 npm test
+npm pack --dry-run --ignore-scripts
 ```
 
-I test usano le API integrate di Node.js e simulano il processo `say`; non riproducono audio né richiedono dipendenze npm. Per eseguirli serve Node.js 24 o successivo con il supporto sperimentale al mocking dei moduli. Per una verifica completa dell'audio, provare anche una sessione Pi interattiva su macOS.
+I test non riproducono audio: simulano `say`, usano directory temporanee e avviano processi Node separati per verificare l'esclusione del blocco audio. Non richiedono dipendenze npm. Serve Node.js 24 o successivo con supporto sperimentale al mocking dei moduli; l'avviso sperimentale è previsto. La riproduzione reale va provata anche in Pi su macOS.
 
 ## Licenza
 
