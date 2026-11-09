@@ -1,0 +1,23 @@
+{
+  "name": "pi-voce",
+  "version": "0.1.0",
+  "description": "Local macOS text-to-speech for Pi coding agent responses",
+  "type": "module",
+  "license": "BSD-3-Clause",
+  "author": "Giordano Sognatore",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/giordanosognatore/pi-voce.git"
+  },
+  "keywords": ["pi-package", "pi", "macos", "text-to-speech"],
+  "files": ["index.ts", "README.md", "LICENSE"],
+  "scripts": {
+    "test": "node --experimental-test-module-mocks --test"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "pi": {
+    "extensions": ["./index.ts"]
+  }
+}
