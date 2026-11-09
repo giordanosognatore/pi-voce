@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { repliesInBranch } from "../history.ts";
-import { stopShortcut } from "../shortcut.ts";
+import { isEscapeInput, stopShortcut } from "../shortcut.ts";
 
 const user = (id, content) => ({ type: "message", id, message: { role: "user", content } });
 const reply = (id, text, timestamp = "2026-11-09T12:00:00Z") => ({ type: "message", id, timestamp, message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text }] } });
@@ -26,9 +26,16 @@ test("missing dates and image-only prompts have safe fallback labels", () => {
 });
 
 test("stop shortcut accepts a custom key, disabling and invalid configuration", () => {
-  assert.equal(stopShortcut().key, "ctrl+alt+s");
+  assert.equal(stopShortcut().key, "escape");
+  assert.equal(stopShortcut("esc").key, "escape");
+  assert.equal(stopShortcut("ctrl+esc").key, "ctrl+escape");
   assert.equal(stopShortcut("ctrl+shift+F8").key, "ctrl+shift+f8");
   assert.equal(stopShortcut("alt+pageUp").key, "alt+pageUp");
   assert.equal(stopShortcut("off").key, undefined);
   assert.match(stopShortcut("not-a-key").warning, /non valido/);
+});
+
+test("Escape recognition supports standard and Kitty key presses without matching unrelated input", () => {
+  for (const input of ["\u001b", "\u001b[27u", "\u001b[27;1u", "\u001b[27;1:1u"]) assert.equal(isEscapeInput(input), true);
+  for (const input of ["\u001bs", "\u001b[A", "\u001b[27;5u", "\u001b[27;1:3u", "\u001b[200~test\u001b[201~"]) assert.equal(isEscapeInput(input), false);
 });

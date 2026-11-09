@@ -27,16 +27,18 @@ mock.module("node:child_process", { exports: {
 const { default: extension } = await import("../index.ts");
 const catalog = "Alice  it_IT # Salve, mi chiamo Alice.\nFederica  it_IT # Salve, mi chiamo Federica.\nLuca  it_IT # Ciao.\nSamantha  en_US # Hello, my name is Samantha.\n";
 const message = (text, stopReason = "stop") => ({ message: { role: "assistant", stopReason, content: [{ type: "text", text }] } });
-function setup({ mode = "tui", result = { code: 0, stdout: catalog, stderr: "" }, answers = [], input = "180", entries = [], directory, lockPath, exec, stopKey = "ctrl+alt+s" } = {}) {
+function setup({ mode = "tui", result = { code: 0, stdout: catalog, stderr: "" }, answers = [], input = "180", entries = [], directory, lockPath, exec, stopKey = "escape" } = {}) {
   const dir = directory ?? join(scratch, String(sequence++));
   process.env.PI_CODING_AGENT_DIR = dir;
   process.env.PI_VOCE_LOCK_PATH = lockPath ?? join(dir, "audio.lock");
   process.env.PI_VOCE_STOP_KEY = stopKey;
   const hooks = {}, commands = {}, shortcuts = {}, notifications = [], dialogs = [], statuses = [], colors = [];
+  const terminalHandlers = new Set();
   const ctx = {
     mode, sessionManager: { getBranch: () => entries },
     ui: {
       theme: { fg: (color, text) => { colors.push(color); return text; } },
+      onTerminalInput: (handler) => { terminalHandlers.add(handler); return () => terminalHandlers.delete(handler); },
       notify: (message, kind) => notifications.push({ message, kind }),
       setStatus: (key, text) => statuses.push({ key, text }),
       input: async (title) => { dialogs.push({ title }); return input; },
@@ -51,7 +53,7 @@ function setup({ mode = "tui", result = { code: 0, stdout: catalog, stderr: "" }
     },
   };
   extension({ on: (n, h) => { hooks[n] = h; }, registerShortcut: (key, options) => { shortcuts[key] = options; }, registerCommand: (n, c) => { commands[n] = c; }, exec: exec ?? (async () => result) });
-  const app = { hooks, commands, shortcuts, ctx, notifications, dialogs, statuses, colors, configPath: join(dir, "pi-voce.json"), run: (args) => commands.voce.handler(args, ctx) };
+  const app = { hooks, commands, shortcuts, terminalHandlers, ctx, notifications, dialogs, statuses, colors, configPath: join(dir, "pi-voce.json"), run: (args) => commands.voce.handler(args, ctx) };
   apps.push(app);
   return app;
 }
@@ -355,22 +357,32 @@ test("temporary config and text preferences never write disk, and nested complet
   assert.equal(await complete("sessione salva"), null);
 });
 
-test("stop shortcut interrupts owned playback without touching preferences or editor", async () => {
+test("Escape stops playback without consuming Pi cancel or changing preferences; listener is cleaned up", async () => {
   const app = setup();
+  await app.hooks.session_start({}, app.ctx);
+  assert.equal(app.terminalHandlers.size, 1);
+  await app.hooks.session_start({}, app.ctx);
+  assert.equal(app.terminalHandlers.size, 1);
   await app.run("off");
   const saved = await readFile(app.configPath, "utf8");
   await app.run("anteprima");
   const child = processes.at(-1);
-  assert.ok(app.shortcuts["ctrl+alt+s"]);
-  await app.shortcuts["ctrl+alt+s"].handler(app.ctx);
+  assert.equal(app.shortcuts.escape, undefined);
+  const handler = [...app.terminalHandlers][0];
+  assert.equal(handler("\u001b[A"), undefined); // arrow, not Escape
+  assert.equal(child.killed, false);
+  assert.equal(handler("\u001b"), undefined); // keep forwarding to Pi
+  await Promise.resolve();
   assert.equal(child.killed, true);
   assert.equal(await readFile(app.configPath, "utf8"), saved);
   assert.doesNotMatch(app.statuses.at(-1).text, /lettura in corso/);
+  await app.hooks.session_shutdown({}, app.ctx);
+  assert.equal(app.terminalHandlers.size, 0);
 });
 
 test("a custom stop key is registered, or can be disabled", () => {
-  const custom = setup({ stopKey: "ctrl+shift+f8" });
-  assert.ok(custom.shortcuts["ctrl+shift+f8"]);
+  const custom = setup({ stopKey: "ctrl+esc" });
+  assert.ok(custom.shortcuts["ctrl+escape"]);
   assert.equal(custom.shortcuts["ctrl+alt+s"], undefined);
   const disabled = setup({ stopKey: "off" });
   assert.equal(Object.keys(disabled.shortcuts).length, 0);

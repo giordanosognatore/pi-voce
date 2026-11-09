@@ -6,7 +6,7 @@ import { readable } from "./text.ts";
 import { languageLabel, parseVoices, resolveVoice, voiceLabel, type Voice } from "./voices.ts";
 import { SpeechPlayer } from "./playback.ts";
 import { repliesInBranch } from "./history.ts";
-import { stopShortcut } from "./shortcut.ts";
+import { isEscapeInput, stopShortcut } from "./shortcut.ts";
 
 export default function (pi: ExtensionAPI) {
   let settings = { ...defaults };
@@ -15,6 +15,7 @@ export default function (pi: ExtensionAPI) {
   let playingVoice: string | undefined;
   let playingRate: number | undefined;
   let readingReplyId: string | undefined;
+  let unsubscribeInput: (() => void) | undefined;
   const shortcut = stopShortcut(process.env.PI_VOCE_STOP_KEY);
   const mutableCommands = ["on", "off", "velocita", "voce", "elenco", "config", "testo"];
   const isTemporary = () => (Object.keys(defaults) as (keyof Settings)[]).some((key) => settings[key] !== saved[key]);
@@ -35,7 +36,9 @@ export default function (pi: ExtensionAPI) {
   });
 
   async function stop() { request++; await player.stop(); readingReplyId = undefined; }
-  if (shortcut.key) pi.registerShortcut(shortcut.key, {
+  // Escape is already Pi's interrupt/cancel key. Observe it without consuming
+  // the event, rather than competing with Pi's reserved shortcut handling.
+  if (shortcut.key && shortcut.key !== "escape") pi.registerShortcut(shortcut.key, {
     description: "Pi Voce: interrompi la lettura di questa sessione",
     handler: async (ctx) => { uiContext = ctx; await stop(); },
   });
@@ -79,6 +82,16 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, ctx) => {
     uiContext = ctx;
+    unsubscribeInput?.();
+    unsubscribeInput = undefined;
+    if (ctx.mode === "tui" && shortcut.key === "escape") {
+      unsubscribeInput = ctx.ui.onTerminalInput((data) => {
+        if (isEscapeInput(data)) void stop().catch((error) => {
+          ctx.ui.notify(`Impossibile fermare la lettura: ${error instanceof Error ? error.message : String(error)}`, "error");
+        });
+        return undefined; // Preserve Pi's own Escape behavior, including dialogs.
+      });
+    }
     if (shortcut.warning) ctx.ui.notify(shortcut.warning, "warning");
     try { settings = await loadSettings(configPath); saved = { ...settings }; }
     catch (error) { ctx.ui.notify(`Preferenze vocali non caricate: ${error instanceof Error ? error.message : String(error)}`, "warning"); }
@@ -101,6 +114,8 @@ export default function (pi: ExtensionAPI) {
   });
   pi.on("session_tree", async () => { pending = ""; await stop(); });
   pi.on("session_shutdown", async () => {
+    unsubscribeInput?.();
+    unsubscribeInput = undefined;
     pending = "";
     await stop();
     if (uiContext?.mode === "tui") uiContext.ui.setStatus("pi-voce", undefined);

@@ -86,15 +86,17 @@ Voce: Federica · 180 p/min · auto off · sessione
 
 ### Scorciatoia per fermare la lettura
 
-**Ctrl+Alt+S** (su Mac, Ctrl+Option+S) interrompe la lettura di questa sessione, senza modificare preferenze o testo nell'editor. La combinazione non coincide con una scorciatoia predefinita di Pi 1.5.0; altre estensioni, Herdr o il terminale possono però intercettarla. `/voce stop` resta sempre disponibile e `/voce status` mostra la combinazione configurata.
+Dalla versione 0.4.1, **Esc** interrompe la lettura di questa sessione, senza modificare preferenze o testo nell'editor. L'estensione osserva il tasto senza consumarlo: Esc continua anche a interrompere il lavoro di Pi o ad annullare un dialogo, come di consueto. La release 0.4.0 usava invece Ctrl+Alt+S.
+
+`/voce stop` resta sempre disponibile e `/voce status` mostra la combinazione configurata. Altre estensioni, Herdr o il terminale possono intercettare i tasti prima di Pi.
 
 Per cambiarla, avvia Pi con la variabile d'ambiente `PI_VOCE_STOP_KEY`:
 
 ```bash
-PI_VOCE_STOP_KEY=ctrl+shift+f8 pi
+PI_VOCE_STOP_KEY=ctrl+esc pi
 ```
 
-Puoi anche esportarla nella configurazione della tua shell prima di avviare Pi o i suoi processi figli. Per disabilitarla usa `PI_VOCE_STOP_KEY=off`. Sono accettati lettere, cifre, F1–F12 e tasti nominati comuni, con modificatori `ctrl`, `alt`, `shift`, `super`. Una combinazione non valida produce un avviso e ripristina Ctrl+Alt+S. Per cambiare l'ambiente di un Pi già aperto serve riavviarlo: `/reload` da solo non acquisisce nuove variabili dalla shell esterna. Evita combinazioni riservate al sistema o ai tuoi altri strumenti.
+Puoi anche esportarla nella configurazione della tua shell prima di avviare Pi o i suoi processi figli. Per disabilitarla usa `PI_VOCE_STOP_KEY=off`. Sono accettati lettere, cifre, F1–F12 e tasti nominati comuni, con modificatori `ctrl`, `alt`, `shift`, `super`. Puoi usare `esc` o `escape`, anche con modificatori. Ctrl+Esc richiede un terminale che distingua questa combinazione da Esc semplice. Una combinazione non valida produce un avviso e ripristina Esc. Per cambiare l'ambiente di un Pi già aperto serve riavviarlo: `/reload` da solo non acquisisce nuove variabili dalla shell esterna. Evita combinazioni riservate al sistema o ai tuoi altri strumenti.
 
 ### Navigazione tra le risposte
 

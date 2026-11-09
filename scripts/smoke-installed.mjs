@@ -20,13 +20,17 @@ extension({
   registerCommand: (name, command) => { commands[name] = command; },
   registerShortcut: (key, shortcut) => { shortcuts[key] = shortcut; },
 });
-assert.ok(commands.voce); assert.ok(shortcuts["ctrl+alt+s"]);
-const ctx = { mode: "tui", ui: { theme: { fg: (_color, text) => text }, setStatus: (_key, text) => statuses.push(text), notify: () => {} } };
+assert.ok(commands.voce); assert.equal(shortcuts.escape, undefined);
+let inputHandler;
+const ctx = { mode: "tui", ui: { theme: { fg: (_color, text) => text }, setStatus: (_key, text) => statuses.push(text), notify: () => {}, onTerminalInput: (handler) => { inputHandler = handler; return () => { inputHandler = undefined; }; } } };
 await hooks.session_start({}, ctx);
+assert.equal(typeof inputHandler, "function");
+assert.equal(inputHandler("\u001b"), undefined);
 assert.match(statuses.at(-1), /auto off/);
 await commands.voce.handler("sessione velocita 210", ctx);
 assert.match(statuses.at(-1), /210.*sessione/);
 assert.equal(existsSync(join(process.env.PI_CODING_AGENT_DIR, "pi-voce.json")), false);
 await hooks.session_shutdown({}, ctx);
 assert.equal(statuses.at(-1), undefined);
+assert.equal(inputHandler, undefined);
 console.log("Smoke test del pacchetto installato superato (nessun audio o provider AI).");

@@ -25,7 +25,7 @@ try {
   assert.equal(manifest.license, "BSD-3-Clause");
   for (const entry of manifest.pi.extensions) assert.ok(existsSync(join(installed, entry)));
   console.log(run(process.execPath, [join(root, "scripts", "smoke-installed.mjs"), installed, scratch], {
-    env: { ...process.env, PI_CODING_AGENT_DIR: join(scratch, "agent"), PI_VOCE_LOCK_PATH: join(scratch, "audio.lock"), PI_VOCE_STOP_KEY: "ctrl+alt+s" },
+    env: { ...process.env, PI_CODING_AGENT_DIR: join(scratch, "agent"), PI_VOCE_LOCK_PATH: join(scratch, "audio.lock"), PI_VOCE_STOP_KEY: "escape" },
   }).trim());
   console.log(`Pacchetto ${manifest.name}@${manifest.version}: creazione, installazione offline e caricamento verificati.`);
 } finally { rmSync(scratch, { recursive: true, force: true }); }

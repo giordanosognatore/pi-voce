@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.1
+
+- Esc diventa il tasto predefinito di arresto della lettura, osservato senza sostituire l'interruzione o l'annullamento di Pi.
+- Supporto dell'alias `esc` nella configurazione, ad esempio `PI_VOCE_STOP_KEY=ctrl+esc`.
+- Rimozione del listener di input alla chiusura e test delle sequenze Escape standard/Kitty.
+
 ## 0.4.0
 
 - CI su Ubuntu/macOS e verifica del tarball realmente installato in un ambiente temporaneo.
