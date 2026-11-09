@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.0
+
+- `/voce riprendi` riparte dall'inizio del paragrafo interrotto senza ripetere quelli conclusi; la riproduzione mantiene un unico blocco audio per tutta la sequenza.
+- Footer e stato mostrano il paragrafo corrente o riprendibile. Il punto è solo in memoria, resta disponibile dopo anteprime e stop, e viene scartato al cambio ramo o runtime.
+- `/voce aiuto` mostra comandi, esempi, scorciatoia effettiva e regole per impostazioni temporanee, salvataggio e ripresa.
+- Salvataggi concorrenti protetti per l'intera lettura/fusione/scrittura atomica, con attesa limitata e recupero dei blocchi lasciati da processi terminati. Le modifiche a campi diversi non si sovrascrivono; `/voce salva` resta una sostituzione esplicita di tutte le preferenze.
+- Test dei paragrafi, della ripresa e della concorrenza tra processi reali, inclusi errori, blocchi e pulizia delle risorse.
+- Corretto il riconoscimento dei paragrafi nelle risposte con titoli, elenchi e citazioni: la pulizia Markdown non elimina più le righe vuote, evitando riprese dall'inizio di intere sezioni accorpate.
+
 ## 0.4.1
 
 - Esc diventa il tasto predefinito di arresto della lettura, osservato senza sostituire l'interruzione o l'annullamento di Pi.

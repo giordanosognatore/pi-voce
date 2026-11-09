@@ -1,6 +1,8 @@
-import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { mkdir, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
+import { acquireAudioLock } from "./audio-lock.ts";
 
 export interface Settings {
   enabled: boolean;
@@ -41,8 +43,25 @@ export async function loadSettings(path: string): Promise<Settings> {
     readTables: value.readTables ?? defaults.readTables,
   };
 }
-export async function saveSettings(path: string, settings: Settings): Promise<void> {
+// The same atomic, dead-owner-recoverable lease protocol also protects settings.
+// Unlike audio requests, saves wait briefly: the lock covers read + merge + rename,
+// not merely the final write. Resolve directory aliases to share the same lock.
+async function withSettingsLock<T>(path: string, operation: (target: string) => Promise<T>, timeoutMs: number): Promise<T> {
   await mkdir(dirname(path), { recursive: true });
+  const target = join(await realpath(dirname(path)), basename(path));
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const lease = acquireAudioLock(`${target}.lock`);
+    if (lease) {
+      try { return await operation(target); }
+      finally { lease.release(); }
+    }
+    if (Date.now() >= deadline) throw new Error("Preferenze occupate da un'altra sessione; riprova tra poco.");
+    await delay(20);
+  }
+}
+
+async function atomicSave(path: string, settings: Settings): Promise<void> {
   const temporary = `${path}.${randomUUID()}.tmp`;
   try {
     await writeFile(temporary, JSON.stringify(settings, null, 2) + "\n", { mode: 0o600 });
@@ -50,4 +69,18 @@ export async function saveSettings(path: string, settings: Settings): Promise<vo
   } finally {
     await unlink(temporary).catch(() => {});
   }
+}
+
+// Explicit full replacement (/voce salva): the last serialized snapshot wins.
+export async function saveSettings(path: string, settings: Settings): Promise<void> {
+  await withSettingsLock(path, (target) => atomicSave(target, settings), 5000);
+}
+
+// Ordinary commands merge only their fields with the freshest saved preferences.
+export async function updateSettings(path: string, patch: Partial<Settings>, options: { timeoutMs?: number } = {}): Promise<Settings> {
+  return withSettingsLock(path, async (target) => {
+    const next = { ...await loadSettings(target), ...patch };
+    await atomicSave(target, next);
+    return next;
+  }, options.timeoutMs ?? 5000);
 }

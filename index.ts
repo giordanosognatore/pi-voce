@@ -1,12 +1,15 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { defaults, loadSettings, saveSettings, validRate, type Settings } from "./settings.ts";
-import { readable } from "./text.ts";
+import { defaults, loadSettings, saveSettings, updateSettings, validRate, type Settings } from "./settings.ts";
+import { readable, speechParagraphs } from "./text.ts";
 import { languageLabel, parseVoices, resolveVoice, voiceLabel, type Voice } from "./voices.ts";
 import { SpeechPlayer } from "./playback.ts";
 import { repliesInBranch } from "./history.ts";
 import { isEscapeInput, stopShortcut } from "./shortcut.ts";
+import { helpText } from "./help.ts";
+
+interface Reading { paragraphs: string[]; next: number; replyId?: string }
 
 export default function (pi: ExtensionAPI) {
   let settings = { ...defaults };
@@ -15,13 +18,17 @@ export default function (pi: ExtensionAPI) {
   let playingVoice: string | undefined;
   let playingRate: number | undefined;
   let readingReplyId: string | undefined;
+  let resumable: Reading | undefined;
+  let activeReading: Reading | undefined;
   let unsubscribeInput: (() => void) | undefined;
   const shortcut = stopShortcut(process.env.PI_VOCE_STOP_KEY);
   const mutableCommands = ["on", "off", "velocita", "voce", "elenco", "config", "testo"];
   const isTemporary = () => (Object.keys(defaults) as (keyof Settings)[]).some((key) => settings[key] !== saved[key]);
   function updateFooter() {
     if (uiContext?.mode !== "tui") return;
-    const text = `Voce: ${playingVoice || settings.voice} · ${playingRate ?? settings.rate} p/min · auto ${settings.enabled ? "on" : "off"}${isTemporary() ? " · sessione" : ""}${playingVoice ? " · lettura in corso" : ""}`;
+    const progress = activeReading ? ` · paragrafo ${activeReading.next + 1}/${activeReading.paragraphs.length}`
+      : !playingVoice && resumable ? ` · riprendi ${resumable.next + 1}/${resumable.paragraphs.length}` : "";
+    const text = `Voce: ${playingVoice || settings.voice} · ${playingRate ?? settings.rate} p/min · auto ${settings.enabled ? "on" : "off"}${isTemporary() ? " · sessione" : ""}${playingVoice ? " · lettura in corso" : ""}${progress}`;
     uiContext.ui.setStatus("pi-voce", uiContext.ui.theme.fg("dim", text));
   }
   let pending = "";
@@ -31,11 +38,18 @@ export default function (pi: ExtensionAPI) {
   const lockPath = process.env.PI_VOCE_LOCK_PATH || join(homedir(), ".pi", "pi-voce-audio.lock");
   const player = new SpeechPlayer(lockPath, (voice, rate) => {
     playingVoice = voice; playingRate = rate;
-    if (!voice) readingReplyId = undefined;
+    if (!voice) { readingReplyId = undefined; activeReading = undefined; }
     updateFooter();
   });
 
-  async function stop() { request++; await player.stop(); readingReplyId = undefined; }
+  async function stop() {
+    const ticket = ++request;
+    await player.stop();
+    if (ticket !== request) return;
+    readingReplyId = undefined;
+    activeReading = undefined;
+    updateFooter();
+  }
   // Escape is already Pi's interrupt/cancel key. Observe it without consuming
   // the event, rather than competing with Pi's reserved shortcut handling.
   if (shortcut.key && shortcut.key !== "escape") pi.registerShortcut(shortcut.key, {
@@ -45,9 +59,7 @@ export default function (pi: ExtensionAPI) {
   async function apply(patch: Partial<Settings>, temporary = false) {
     if (!temporary) {
       // Persist only the requested fields: unrelated temporary overrides stay local.
-      const nextSaved = { ...await loadSettings(configPath), ...patch };
-      await saveSettings(configPath, nextSaved);
-      saved = nextSaved;
+      saved = await updateSettings(configPath, patch);
     }
     settings = { ...settings, ...patch };
     await stop();
@@ -58,7 +70,7 @@ export default function (pi: ExtensionAPI) {
     if (result.code !== 0) throw new Error(result.stderr.trim() || `say è terminato con codice ${result.code}`);
     return parseVoices(result.stdout);
   }
-  async function speak(text: string | undefined, ctx: ExtensionContext, preferred = settings, replyId?: string) {
+  async function speak(text: string | undefined, ctx: ExtensionContext, preferred = settings, replyId?: string, resume?: Reading) {
     const ticket = ++request;
     await player.stop();
     try {
@@ -69,13 +81,24 @@ export default function (pi: ExtensionAPI) {
       if (chosen.name !== preferred.voice || chosen.locale !== preferred.locale) {
         ctx.ui.notify(`Voce ${preferred.voice} (${preferred.locale}) non disponibile: uso ${chosen.name} (${chosen.locale}) per questa lettura. Preferenza salvata invariata; usa /voce config per cambiarla.`, "warning");
       }
-      const speech = text === undefined ? chosen.sample || "Questa è una prova della voce selezionata." : readable(text, preferred);
-      if (!speech.trim()) { ctx.ui.notify("Nessun testo da leggere.", "info"); return; }
-      readingReplyId = replyId;
-      const started = await player.play(speech, chosen.name, preferred.rate, (message) => ctx.ui.notify(message, "warning"));
+      const paragraphs = resume ? resume.paragraphs.slice(resume.next) : speechParagraphs(
+        text === undefined ? chosen.sample || "Questa è una prova della voce selezionata." : readable(text, preferred),
+      );
+      if (!paragraphs.length) { ctx.ui.notify("Nessun testo da leggere.", "info"); return; }
+      const reading = resume ?? (text === undefined ? undefined : { paragraphs, next: 0, replyId });
+      const offset = resume?.next ?? 0;
+      const started = await player.play(paragraphs, chosen.name, preferred.rate, (message) => ctx.ui.notify(message, "warning"), reading ? (completed) => {
+        if (ticket !== request) return;
+        reading.next = offset + completed;
+        resumable = reading.next < reading.paragraphs.length ? reading : undefined;
+        activeReading = resumable;
+        readingReplyId = resumable?.replyId;
+        updateFooter();
+      } : undefined);
       if (!started && ticket === request) readingReplyId = undefined;
     } catch (error) {
-      if (ticket === request) readingReplyId = undefined;
+      if (ticket !== request) return;
+      readingReplyId = undefined;
       ctx.ui.notify(`Lettura vocale: ${error instanceof Error ? error.message : String(error)}`, "error");
     }
   }
@@ -112,11 +135,12 @@ export default function (pi: ExtensionAPI) {
       await speak(text, ctx, settings, last?.text === text ? last.id : undefined);
     }
   });
-  pi.on("session_tree", async () => { pending = ""; await stop(); });
+  pi.on("session_tree", async () => { pending = ""; resumable = undefined; await stop(); });
   pi.on("session_shutdown", async () => {
     unsubscribeInput?.();
     unsubscribeInput = undefined;
     pending = "";
+    resumable = undefined;
     await stop();
     if (uiContext?.mode === "tui") uiContext.ui.setStatus("pi-voce", undefined);
     uiContext = undefined;
@@ -144,11 +168,13 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.registerCommand("voce", {
-    description: "Leggi l'ultima risposta; risposte, status, config, sessione <comando>, salva, ripristina, testo, on, off, stop, anteprima, velocita [80–400], elenco [lingua o nome], voce [lingua o nome]",
+    description: "Leggi l'ultima risposta; aiuto, riprendi, risposte, status, config, sessione <comando>, salva, ripristina, testo, on, off, stop, anteprima, velocita [80–400], elenco [lingua o nome], voce [lingua o nome]",
     getArgumentCompletions: async (prefix) => {
       const scope = prefix.startsWith("sessione ") ? "sessione " : "";
       if (scope) prefix = prefix.slice(scope.length);
       const subcommands = [
+        { value: "aiuto", label: "aiuto", description: "Riepilogo dei comandi con esempi e regole di salvataggio e ripresa" },
+        { value: "riprendi", label: "riprendi", description: "Riparti dall'inizio del paragrafo interrotto" },
         { value: "risposte", label: "risposte [filtro]", description: "Cerca per prompt, risposta o data e scegli cosa ascoltare" },
         { value: "sessione", label: "sessione <comando>", description: "Modifica temporanea, senza salvare" },
         { value: "salva", label: "salva", description: "Salva tutte le impostazioni correnti come predefinite" },
@@ -201,6 +227,19 @@ export default function (pi: ExtensionAPI) {
           const last = repliesInBranch(ctx.sessionManager.getBranch())[0];
           if (last) await speak(last.text, ctx, settings, last.id);
           else ctx.ui.notify("Nessuna risposta da leggere nel ramo corrente.", "info");
+        } else if (action === "aiuto") {
+          ctx.ui.notify(helpText(shortcut.key), "info");
+        } else if (action === "riprendi") {
+          if (playingVoice) { ctx.ui.notify("Una lettura è già in corso in questa sessione. Usa Esc o /voce stop prima di riprendere.", "info"); return; }
+          const reading = resumable;
+          if (!reading) { ctx.ui.notify("Nessuna lettura da riprendere in questa sessione.", "info"); return; }
+          if (reading.replyId && !repliesInBranch(ctx.sessionManager.getBranch()).some((reply) => reply.id === reading.replyId)) {
+            resumable = undefined;
+            updateFooter();
+            ctx.ui.notify("La risposta interrotta non è più nel ramo corrente.", "warning");
+            return;
+          }
+          await speak(undefined, ctx, settings, undefined, reading);
         } else if (action === "risposte") {
           const filter = rest.join(" ");
           const replies = repliesInBranch(ctx.sessionManager.getBranch(), { filter, playingId: readingReplyId });
@@ -245,6 +284,7 @@ export default function (pi: ExtensionAPI) {
               `  Modifiche rispetto alle salvate: ${isTemporary() ? "sì (solo sessione)" : "nessuna"}`,
               "  Audio condiviso: una lettura alla volta",
               `  Scorciatoia stop: ${shortcut.key || "disabilitata"}`,
+              `  Ripresa: ${resumable ? `paragrafo ${resumable.next + 1} di ${resumable.paragraphs.length} (solo in memoria)` : "nessuna lettura interrotta"}`,
               `  File preferenze:\n    ${configPath}`,
             ].join("\n"),
           ].join("\n\n"), "info");
@@ -264,7 +304,7 @@ export default function (pi: ExtensionAPI) {
           ctx.ui.notify(`Lettura automatica ${settings.enabled ? "attiva" : "disattivata"}; ${temporary ? "solo per questa sessione" : "preferenza salvata"}.`, "info");
         } else if (action === "stop") {
           await stop();
-          ctx.ui.notify("Lettura interrotta in questa sessione.", "info");
+          ctx.ui.notify(`Lettura interrotta in questa sessione.${resumable ? ` /voce riprendi dal paragrafo ${resumable.next + 1} di ${resumable.paragraphs.length}.` : ""}`, "info");
         } else if (action === "config") {
           const voices = await listVoices();
           if (!voices.length) { ctx.ui.notify("Nessuna voce disponibile.", "warning"); return; }
@@ -315,7 +355,7 @@ export default function (pi: ExtensionAPI) {
             ctx.ui.notify(`Voce impostata: ${settings.voice}${temporary ? " (solo questa sessione)" : ""}.`, "info");
           }
         } else {
-          ctx.ui.notify("Comandi: /voce | risposte | status | config | sessione <comando> | salva | ripristina | testo | on | off | stop | anteprima | velocita [80–400] | elenco [lingua o nome] | voce [lingua o nome]", "info");
+          ctx.ui.notify("Comando non riconosciuto. Usa /voce aiuto per comandi, esempi e regole di salvataggio.", "info");
         }
       } catch (error) {
         ctx.ui.notify(`Operazione vocale non riuscita: ${error instanceof Error ? error.message : String(error)}`, "error");

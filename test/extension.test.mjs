@@ -11,8 +11,10 @@ const scratch = mkdtempSync(join(tmpdir(), "pi-voce-test-"));
 const original = { dir: process.env.PI_CODING_AGENT_DIR, lock: process.env.PI_VOCE_LOCK_PATH, stopKey: process.env.PI_VOCE_STOP_KEY };
 const processes = [], apps = [];
 let sequence = 0;
+let spawnFault;
 mock.module("node:child_process", { exports: {
   spawn(file, args) {
+    if (spawnFault) { const error = spawnFault; spawnFault = undefined; throw error; }
     const child = new EventEmitter();
     child.pid = process.pid;
     child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough();
@@ -409,6 +411,219 @@ test("reply browser filters by prompt and identifies the current reading", async
   await app.run("stop");
   await app.run("risposte");
   assert.ok(app.dialogs.at(-1).items.every((label) => !label.includes("in lettura")));
+});
+
+test("Escape/resume on a structured Markdown response restarts the current section, not the introduction", async () => {
+  const text = "Introduzione.\n\n### Primo punto\n- Prima voce.\n- Seconda voce.\n\n### Secondo punto\n- Terza voce.\n- Quarta voce.\n\nConclusione.";
+  const app = setup({ entries: [{ type: "message", id: "structured", ...message(text) }] });
+  await app.hooks.session_start({}, app.ctx);
+  await app.run("");
+  assert.equal(processes.at(-1).input, "Introduzione.");
+  processes.at(-1).emit("close", 0, null);
+  assert.equal(processes.at(-1).input, "Primo punto\nPrima voce.\nSeconda voce.");
+  processes.at(-1).emit("close", 0, null);
+  const interrupted = processes.at(-1).input;
+  assert.equal(interrupted, "Secondo punto\nTerza voce.\nQuarta voce.");
+  [...app.terminalHandlers][0]("\u001b");
+  await Promise.resolve();
+  assert.match(app.statuses.at(-1).text, /riprendi 3\/4/);
+  await app.run("riprendi");
+  assert.equal(processes.at(-1).input, interrupted);
+  assert.doesNotMatch(processes.at(-1).input, /Introduzione|Primo punto/);
+  processes.at(-1).emit("close", 0, null);
+  assert.equal(processes.at(-1).input, "Conclusione.");
+});
+
+test("paragraph playback advances only on close, and Escape/resume replays only the interrupted paragraph", async () => {
+  const app = setup({ entries: [{ type: "message", id: "answer", ...message("Primo paragrafo.\n\nSecondo paragrafo.\n\nTerzo paragrafo.") }] });
+  await app.hooks.session_start({}, app.ctx);
+  const count = processes.length;
+  await app.run("");
+  const first = processes.at(-1);
+  assert.equal(processes.length, count + 1);
+  assert.equal(first.input, "Primo paragrafo.");
+  assert.match(app.statuses.at(-1).text, /paragrafo 1\/3/);
+  await app.run("riprendi");
+  assert.match(app.notifications.at(-1).message, /già in corso/);
+  assert.equal(processes.at(-1), first);
+  first.emit("close", 0, null);
+  const second = processes.at(-1);
+  assert.equal(second.input, "Secondo paragrafo.");
+  assert.match(app.statuses.at(-1).text, /paragrafo 2\/3/);
+  assert.equal([...app.terminalHandlers][0]("\u001b"), undefined);
+  await Promise.resolve();
+  assert.equal(second.killed, true);
+  assert.match(app.statuses.at(-1).text, /riprendi 2\/3/);
+  await app.run("riprendi");
+  assert.equal(processes.at(-1).input, "Secondo paragrafo.");
+  processes.at(-1).emit("close", 0, null);
+  assert.equal(processes.at(-1).input, "Terzo paragrafo.");
+  await app.run("stop");
+  await app.run("riprendi");
+  assert.equal(processes.at(-1).input, "Terzo paragrafo.");
+  processes.at(-1).emit("close", 0, null);
+  await app.run("riprendi");
+  assert.match(app.notifications.at(-1).message, /Nessuna lettura da riprendere/);
+  assert.doesNotMatch(app.statuses.at(-1).text, /riprendi|paragrafo|lettura in corso/);
+  await assert.rejects(readFile(app.configPath), { code: "ENOENT" });
+});
+
+test("resume keeps cleaned text but adopts current voice/rate; preview and new prompts preserve the point", async () => {
+  const app = setup({ entries: [{ type: "message", ...message("Inizio.\n\nFine con https://example.com.") }] });
+  await app.run("");
+  processes.at(-1).emit("close", 0, null);
+  await app.run("stop");
+  await app.hooks.before_agent_start({}, app.ctx);
+  await app.run("sessione voce Federica");
+  await app.run("sessione velocita 240");
+  await app.run("anteprima");
+  processes.at(-1).emit("close", 0, null);
+  await app.run("riprendi");
+  assert.deepEqual(processes.at(-1).args, ["-v", "Federica", "-r", "240"]);
+  assert.match(processes.at(-1).input, /Fine con.*collegamento omesso/);
+  assert.doesNotMatch(processes.at(-1).input, /Inizio/);
+});
+
+test("a paragraph sequence retains the audio lease; busy resume does not lose its point or kill a foreign player", async () => {
+  const lockPath = join(scratch, "paragraphs-shared.lock");
+  const first = setup({ lockPath, entries: [{ type: "message", ...message("Uno.\n\nDue.") }] });
+  const second = setup({ lockPath });
+  await first.run("");
+  processes.at(-1).emit("close", 0, null);
+  const owner = processes.at(-1), count = processes.length;
+  assert.equal(owner.input, "Due.");
+  await second.run("anteprima");
+  assert.equal(processes.length, count);
+  assert.match(second.notifications.at(-1).message, /Audio occupato/);
+  await first.run("stop");
+  await second.run("anteprima");
+  const foreign = processes.at(-1);
+  await first.run("riprendi");
+  assert.equal(processes.at(-1), foreign);
+  assert.match(first.notifications.at(-1).message, /Audio occupato/);
+  assert.match(first.statuses.at(-1).text, /riprendi 2\/2/);
+  await first.run("stop");
+  assert.equal(foreign.killed, false);
+  await second.run("stop");
+  await first.run("riprendi");
+  assert.equal(processes.at(-1).input, "Due.");
+});
+
+test("new successful reading replaces the point; tree changes, removed answers and runtime replacement discard it", async () => {
+  const entries = [{ type: "message", id: "old", ...message("Vecchia.\n\nCoda.") }];
+  const app = setup({ entries });
+  await app.run("");
+  await app.run("stop");
+  entries.push({ type: "message", id: "new", ...message("Nuova.") });
+  await app.run("");
+  await app.run("stop");
+  await app.run("riprendi");
+  assert.equal(processes.at(-1).input, "Nuova.");
+  await app.hooks.session_tree({}, app.ctx);
+  await app.run("riprendi");
+  assert.match(app.notifications.at(-1).message, /Nessuna lettura/);
+  await app.run("");
+  await app.run("stop");
+  entries.pop();
+  await app.run("riprendi");
+  assert.match(app.notifications.at(-1).message, /non è più nel ramo/);
+  await app.run("");
+  await app.hooks.session_shutdown({}, app.ctx);
+  const reloaded = setup({ entries });
+  await reloaded.run("riprendi");
+  assert.match(reloaded.notifications.at(-1).message, /Nessuna lettura/);
+});
+
+test("preview alone never creates a resume point, and unknown commands link to integrated help", async () => {
+  const app = setup({ stopKey: "ctrl+esc" });
+  await app.run("anteprima");
+  await app.run("stop");
+  await app.run("riprendi");
+  assert.match(app.notifications.at(-1).message, /Nessuna lettura/);
+  const before = processes.length;
+  await app.run("aiuto");
+  const help = app.notifications.at(-1).message;
+  assert.match(help, /PI VOCE — AIUTO.*ASCOLTO.*PREFERENZE.*SESSIONE E SALVATAGGIO.*RIPRESA/s);
+  assert.match(help, /ctrl\+escape/);
+  assert.match(help, /dall'inizio del paragrafo/);
+  for (const { value } of await app.commands.voce.getArgumentCompletions("")) assert.ok(help.includes(`/voce ${value}`), `Missing help for ${value}`);
+  assert.equal(await app.commands.voce.getArgumentCompletions("sessione riprendi"), null);
+  await app.run("inesistente");
+  assert.match(app.notifications.at(-1).message, /\/voce aiuto/);
+  assert.equal(processes.length, before);
+  await assert.rejects(readFile(app.configPath), { code: "ENOENT" });
+});
+
+test("a later paragraph spawn failure frees the lease and keeps that paragraph resumable", async () => {
+  const app = setup({ entries: [{ type: "message", ...message("Primo.\n\nSecondo.") }] });
+  await app.run("");
+  spawnFault = new Error("spawn failure in next paragraph");
+  processes.at(-1).emit("close", 0, null);
+  await Promise.resolve();
+  assert.match(app.notifications.at(-1).message, /spawn failure in next paragraph/);
+  assert.match(app.statuses.at(-1).text, /riprendi 2\/2/);
+  await app.run("riprendi");
+  assert.equal(processes.at(-1).input, "Secondo.");
+});
+
+test("delayed process closure keeps the lease and cancellation never advances even with a zero exit code", async () => {
+  const lockPath = join(scratch, "delayed-close.lock");
+  const app = setup({ lockPath, entries: [{ type: "message", ...message("Uno.\n\nDue.") }] });
+  const other = setup({ lockPath });
+  await app.run("");
+  const old = processes.at(-1), count = processes.length;
+  old.kill = () => { old.killed = true; return true; }; // signal sent; OS close comes later
+  const stopping = app.run("stop");
+  assert.equal(old.killed, true);
+  await other.run("anteprima");
+  assert.equal(processes.length, count);
+  assert.match(other.notifications.at(-1).message, /Audio occupato/);
+  const restarting = app.run("");
+  old.emit("close", 0, null); // successful-looking exit after cancellation
+  await Promise.all([stopping, restarting]);
+  assert.equal(processes.length, count + 1);
+  assert.equal(processes.at(-1).input, "Uno.");
+  assert.match(app.statuses.at(-1).text, /lettura in corso.*paragrafo 1\/2/);
+});
+
+test("Escape during resume preparation prevents delayed audio and preserves the interrupted point", async () => {
+  let resolve, delayed = false;
+  const app = setup({ entries: [{ type: "message", ...message("Uno.\n\nDue.") }], exec: () => delayed ? new Promise((done) => { resolve = done; }) : Promise.resolve({ code: 0, stdout: catalog, stderr: "" }) });
+  await app.hooks.session_start({}, app.ctx);
+  await app.run("");
+  processes.at(-1).emit("close", 0, null);
+  await app.run("stop");
+  delayed = true;
+  const count = processes.length, resuming = app.run("riprendi");
+  while (!resolve) await Promise.resolve();
+  [...app.terminalHandlers][0]("\u001b");
+  resolve({ code: 0, stdout: catalog, stderr: "" });
+  await resuming;
+  assert.equal(processes.length, count);
+  assert.match(app.statuses.at(-1).text, /riprendi 2\/2/);
+  delayed = false;
+  await app.run("riprendi");
+  assert.equal(processes.at(-1).input, "Due.");
+});
+
+test("an unsuccessful paragraph never advances the resume point", async () => {
+  const app = setup({ entries: [{ type: "message", ...message("Primo.\n\nSecondo.") }] });
+  await app.run("");
+  processes.at(-1).emit("close", 1, null);
+  assert.match(app.statuses.at(-1).text, /riprendi 1\/2/);
+  await app.run("riprendi");
+  assert.equal(processes.at(-1).input, "Primo.");
+});
+
+test("simultaneous commands from separate runtimes merge only requested preferences", async () => {
+  const directory = join(scratch, "concurrent-settings");
+  const first = setup({ directory }), second = setup({ directory });
+  await first.run("sessione voce Federica");
+  await Promise.all([first.run("velocita 230"), second.run("voce Luca")]);
+  assert.deepEqual(JSON.parse(await readFile(first.configPath, "utf8")), { enabled: false, voice: "Luca", locale: "it_IT", rate: 230, readCode: false, readUrls: false, readTables: true });
+  assert.match(first.statuses.at(-1).text, /Federica.*230/);
+  await first.run("salva"); // Explicit full snapshot, not a disjoint-field patch.
+  assert.equal(JSON.parse(await readFile(first.configPath, "utf8")).voice, "Federica");
 });
 
 test("player error and abnormal exit free the audio lease", async () => {

@@ -2,10 +2,16 @@ import type { Settings } from "./settings.ts";
 
 type TextOptions = Pick<Settings, "readCode" | "readUrls" | "readTables">;
 
+// Split only after Markdown cleanup, so fences/references are parsed as a whole.
+// A soft line break (including a list or table row) is not a new paragraph.
+export function speechParagraphs(text: string): string[] {
+  return text.replace(/\r\n?/g, "\n").split(/\n(?:[ \t]*\n)+/).map((part) => part.trim()).filter(Boolean);
+}
+
 // A deliberately conservative Markdown-to-speech conversion, not a full parser.
 export function readable(text: string, options: TextOptions): string {
   const references = new Map<string, string>();
-  text = text.replace(/^\s{0,3}\[([^\]]+)\]:\s*(\S+).*$/gm, (_all, id, url) => {
+  text = text.replace(/^[ \t]{0,3}\[([^\]]+)\]:[ \t]*(\S+).*$/gm, (_all, id, url) => {
     references.set(id.toLowerCase(), url);
     return "";
   });
@@ -54,10 +60,12 @@ export function readable(text: string, options: TextOptions): string {
     .replace(/<\/?[a-z][^>]*>/gi, " ")
     .replace(/&amp;/g, " e ").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&nbsp;/g, " ")
     .replace(/`+([^`]+)`+/g, "$1")
-    .replace(/^\s{0,3}#{1,6}\s+|\s+#+\s*$/gm, "")
-    .replace(/^\s{0,3}(?:[-*_]\s*){3,}$|^\s{0,3}={3,}\s*$/gm, "")
-    .replace(/^\s*>+\s?/gm, "")
-    .replace(/^\s*(?:[-+*]|\d+[.)])\s+(?:\[[ xX]\]\s*)?/gm, "")
+    // These are LINE markers: \s would also swallow blank lines and merge
+    // paragraphs, causing stop/resume to replay several sections as one block.
+    .replace(/^[ \t]{0,3}#{1,6}[ \t]+|[ \t]+#+[ \t]*$/gm, "")
+    .replace(/^[ \t]{0,3}(?:[-*_][ \t]*){3,}$|^[ \t]{0,3}={3,}[ \t]*$/gm, "")
+    .replace(/^[ \t]*>+[ \t]?/gm, "")
+    .replace(/^[ \t]*(?:[-+*]|\d+[.)])[ \t]+(?:\[[ xX]\][ \t]*)?/gm, "")
     .replace(/\*\*([^]*?)\*\*|__([^]*?)__/g, (_all, a, b) => a ?? b)
     .replace(/\*([^*\n]+)\*|(?<!\w)_([^_\n]+)_(?!\w)|~~([^]*?)~~/g, (_all, a, b, c) => a ?? b ?? c)
     .replace(/[\p{Extended_Pictographic}\uFE0F\u200D]/gu, "")

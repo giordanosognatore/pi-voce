@@ -1,6 +1,6 @@
 {
   "name": "pi-voce",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Local macOS text-to-speech for Pi coding agent responses",
   "type": "module",
   "license": "BSD-3-Clause",
@@ -10,7 +10,7 @@
     "url": "https://github.com/giordanosognatore/pi-voce.git"
   },
   "keywords": ["pi-package", "pi", "macos", "text-to-speech"],
-  "files": ["index.ts", "settings.ts", "text.ts", "voices.ts", "audio-lock.ts", "playback.ts", "history.ts", "shortcut.ts", "README.md", "LICENSE", "CHANGELOG.md"],
+  "files": ["index.ts", "settings.ts", "text.ts", "voices.ts", "audio-lock.ts", "playback.ts", "history.ts", "shortcut.ts", "help.ts", "README.md", "LICENSE", "CHANGELOG.md"],
   "scripts": {
     "test": "node --experimental-test-module-mocks --test",
     "test:package": "node scripts/check-package.mjs"

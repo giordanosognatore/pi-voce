@@ -14,7 +14,7 @@ registerHooks({ load(url, context, nextLoad) {
   return nextLoad(url, context);
 }});
 const { default: extension } = await import(pathToFileURL(join(process.argv[2], "index.ts")).href);
-const hooks = {}, commands = {}, shortcuts = {}, statuses = [];
+const hooks = {}, commands = {}, shortcuts = {}, statuses = [], notifications = [];
 extension({
   on: (name, handler) => { hooks[name] = handler; },
   registerCommand: (name, command) => { commands[name] = command; },
@@ -22,14 +22,23 @@ extension({
 });
 assert.ok(commands.voce); assert.equal(shortcuts.escape, undefined);
 let inputHandler;
-const ctx = { mode: "tui", ui: { theme: { fg: (_color, text) => text }, setStatus: (_key, text) => statuses.push(text), notify: () => {}, onTerminalInput: (handler) => { inputHandler = handler; return () => { inputHandler = undefined; }; } } };
+const ctx = { mode: "tui", ui: { theme: { fg: (_color, text) => text }, setStatus: (_key, text) => statuses.push(text), notify: (text) => notifications.push(text), onTerminalInput: (handler) => { inputHandler = handler; return () => { inputHandler = undefined; }; } } };
 await hooks.session_start({}, ctx);
 assert.equal(typeof inputHandler, "function");
 assert.equal(inputHandler("\u001b"), undefined);
 assert.match(statuses.at(-1), /auto off/);
 await commands.voce.handler("sessione velocita 210", ctx);
 assert.match(statuses.at(-1), /210.*sessione/);
-assert.equal(existsSync(join(process.env.PI_CODING_AGENT_DIR, "pi-voce.json")), false);
+const configPath = join(process.env.PI_CODING_AGENT_DIR, "pi-voce.json");
+assert.equal(existsSync(configPath), false);
+await commands.voce.handler("aiuto", ctx);
+assert.match(notifications.at(-1), /PI VOCE — AIUTO/);
+assert.match(notifications.at(-1), /\/voce riprendi/);
+await commands.voce.handler("riprendi", ctx);
+assert.match(notifications.at(-1), /Nessuna lettura da riprendere/);
+await commands.voce.handler("velocita 230", ctx);
+assert.equal(JSON.parse(readFileSync(configPath, "utf8")).rate, 230);
+assert.equal(existsSync(`${configPath}.lock`), false);
 await hooks.session_shutdown({}, ctx);
 assert.equal(statuses.at(-1), undefined);
 assert.equal(inputHandler, undefined);

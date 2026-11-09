@@ -18,10 +18,10 @@ Sviluppata su **macOS Monterey 12.7.6, Intel**. Altre configurazioni macOS non s
 pi install git:github.com/giordanosognatore/pi-voce
 ```
 
-Per fissare l'installazione alla release 0.4.0:
+Per fissare l'installazione alla release 0.5.0:
 
 ```bash
-pi install git:github.com/giordanosognatore/pi-voce@v0.4.0
+pi install git:github.com/giordanosognatore/pi-voce@v0.5.0
 ```
 
 Un tag resta fisso: per passare a una versione successiva cambia esplicitamente il riferimento. La [pagina delle release](https://github.com/giordanosognatore/pi-voce/releases) contiene note e sorgenti.
@@ -48,6 +48,8 @@ Il pacchetto non è ancora pubblicato su npm.
 | Comando Pi | Effetto |
 | --- | --- |
 | `/voce` | Legge l'ultima risposta del ramo corrente, anche con automatismo disattivato |
+| `/voce aiuto` | Mostra comandi, esempi e regole di salvataggio e ripresa |
+| `/voce riprendi` | Riparte dall'inizio del paragrafo interrotto |
 | `/voce risposte [filtro]` | Cerca e sceglie una risposta completa del ramo corrente da ascoltare |
 | `/voce status` | Confronta impostazioni correnti e salvate; mostra il percorso delle preferenze |
 | `/voce sessione <comando>` | Applica un'impostazione solo alla sessione corrente |
@@ -82,7 +84,7 @@ Nella modalità interattiva compare uno stato compatto, per esempio:
 Voce: Federica · 180 p/min · auto off · sessione
 ```
 
-«sessione» indica che le impostazioni correnti differiscono da quelle salvate. Durante la riproduzione appare «lettura in corso»; voce e velocità mostrate corrispondono alla riproduzione effettiva, anche per un'anteprima o una voce di ripiego. L'indicatore viene rimosso alla chiusura dell'estensione e non viene visualizzato in modalità RPC/print. La sua visibilità dipende dal footer in uso: un footer personalizzato deve includere gli stati delle estensioni.
+«sessione» indica che le impostazioni correnti differiscono da quelle salvate. Durante la riproduzione appare «lettura in corso» e, per le risposte, «paragrafo 2/5». Dopo lo stop compare «riprendi 2/5» se esiste un punto di ripresa; `/voce status` riporta anche questo avanzamento. Voce e velocità mostrate corrispondono alla riproduzione effettiva, anche per un'anteprima o una voce di ripiego. L'indicatore viene rimosso alla chiusura dell'estensione e non viene visualizzato in modalità RPC/print. La sua visibilità dipende dal footer in uso: un footer personalizzato deve includere gli stati delle estensioni.
 
 ### Scorciatoia per fermare la lettura
 
@@ -97,6 +99,24 @@ PI_VOCE_STOP_KEY=ctrl+esc pi
 ```
 
 Puoi anche esportarla nella configurazione della tua shell prima di avviare Pi o i suoi processi figli. Per disabilitarla usa `PI_VOCE_STOP_KEY=off`. Sono accettati lettere, cifre, F1–F12 e tasti nominati comuni, con modificatori `ctrl`, `alt`, `shift`, `super`. Puoi usare `esc` o `escape`, anche con modificatori. Ctrl+Esc richiede un terminale che distingua questa combinazione da Esc semplice. Una combinazione non valida produce un avviso e ripristina Esc. Per cambiare l'ambiente di un Pi già aperto serve riavviarlo: `/reload` da solo non acquisisce nuove variabili dalla shell esterna. Evita combinazioni riservate al sistema o ai tuoi altri strumenti.
+
+### Ripresa dal paragrafo interrotto
+
+Dalla versione 0.5.0 le risposte sono lette per paragrafi, mantenendo il blocco audio per tutta la sequenza. Il punto avanza solo dopo la conclusione corretta del relativo processo `say`, non quando il testo è stato semplicemente inviato al lettore.
+
+```text
+/voce
+# Premi Esc durante la lettura
+/voce riprendi
+```
+
+- La ripresa parte **dall'inizio del paragrafo interrotto**, non dalla parola esatta. I paragrafi già conclusi non vengono ripetuti.
+- I paragrafi sono separati da righe vuote **dopo la pulizia Markdown**; un semplice a capo non crea un nuovo paragrafo. L'avvio di un processo `say` per paragrafo può introdurre brevi pause tra i blocchi.
+- Il testo ripulito rimane quello della lettura originale. Alla ripresa si usano invece **voce e velocità correnti**, con la consueta voce di ripiego se necessario. Le nuove opzioni per codice, URL e tabelle valgono dalla prossima lettura completa.
+- Esc, `/voce stop`, `/voce off` e un nuovo prompt fermano il lettore conservando il punto. Una nuova lettura manuale o automatica effettivamente avviata lo sostituisce. Le anteprime non lo sostituiscono e da sole non creano un punto di ripresa.
+- Dopo la conclusione completa il punto viene eliminato. Viene eliminato anche con `/tree`, `/reload`, chiusura o sostituzione della sessione. **Non è scritto su disco** e non sopravvive al riavvio.
+- Se la risposta non è più nel ramo corrente non viene ripresa. Se un'altra sessione occupa l'audio, la ripresa non si accoda e il punto resta disponibile per un nuovo tentativo.
+- Se una lettura è già in corso nella stessa sessione, `/voce riprendi` non la riavvia: fermala prima. `/voce` senza argomenti continua invece a leggere dall'inizio l'ultima risposta.
 
 ### Navigazione tra le risposte
 
@@ -168,7 +188,11 @@ Queste modifiche non scrivono il file delle preferenze e restano attive durante 
 
 Un comando normale salva **solo i campi che modifica**. Ad esempio, dopo `/voce sessione voce Federica`, `/voce velocita 220` salva la velocità ma non Federica: la voce temporanea rimane attiva fino al ripristino, senza diventare il nuovo valore predefinito. `/voce config` salva lingua, voce, velocità e automatismo; `/voce testo` salva soltanto le tre opzioni del testo.
 
-Le altre sessioni già aperte non si aggiornano in tempo reale: usa `/voce ripristina` o `/reload` per adottare i valori salvati altrove. I salvataggi rileggono le preferenze esistenti prima di modificare i campi richiesti; salvataggi esattamente simultanei possono comunque prevalere l'uno sull'altro. Le anteprime e `/voce stop` non modificano le preferenze.
+Le altre sessioni già aperte non si aggiornano in tempo reale: usa `/voce ripristina` o `/reload` per adottare i valori salvati altrove. Le anteprime, lo stop, la ripresa e l'aiuto non modificano le preferenze.
+
+Dalla versione 0.5.0, i salvataggi tra copie aggiornate sono serializzati da un blocco accanto al file (`pi-voce.json.lock`). L'intera operazione di **lettura, fusione dei soli campi modificati e sostituzione atomica del file** avviene sotto lo stesso blocco: due sessioni che modificano contemporaneamente campi diversi non si perdono le rispettive modifiche. Se modificano lo stesso campo prevale l'ultimo salvataggio serializzato. `/voce salva` resta una sostituzione esplicita di **tutte** le preferenze con quelle della sessione che lo esegue, comprese le eventuali scelte meno recenti.
+
+Il salvataggio attende al massimo circa cinque secondi se il blocco è occupato, poi segnala di riprovare senza applicare la modifica. Un blocco lasciato da un processo certamente terminato viene recuperato; metadati dubbi o un proprietario ancora vivo non vengono forzati. I file temporanei sono privati (permessi `0600`) e vengono rimossi in caso di errore. Non cancellare il blocco mentre una sessione sta salvando. Tutte le sessioni che scrivono sullo stesso file devono avere il codice aggiornato; le vecchie versioni non rispettano questo blocco.
 
 I file di preferenze della versione 0.2 vengono letti conservando tutti i valori esistenti e aggiungendo i valori iniziali delle opzioni del testo. Un file non valido produce un avviso; un nuovo runtime usa le impostazioni iniziali senza riscrivere il file. `/voce salva` può sostituirlo esplicitamente con tutte le impostazioni correnti.
 
@@ -185,6 +209,10 @@ I file di preferenze della versione 0.2 vengono letti conservando tutti i valori
 9. Prova `/voce risposte`: scegli una risposta precedente e controlla che venga letta quella selezionata.
 10. Esegui `/voce sessione velocita 240`: il footer deve mostrare 240 e «sessione» se la velocità salvata è diversa. Con `/voce ripristina` torna al valore salvato.
 11. Ripeti la modifica temporanea e usa `/voce salva`, poi `/reload`: questa volta la velocità deve restare 240.
+12. Apri `/voce aiuto`: verifica il riepilogo e la scorciatoia effettivamente configurata.
+13. Leggi una risposta con almeno tre paragrafi. Premi Esc nel secondo, poi `/voce riprendi`: deve ricominciare il secondo, non il primo. Dopo aver concluso, una nuova ripresa deve indicare che non ci sono letture interrotte.
+14. Interrompi di nuovo una risposta, ascolta e ferma un'anteprima, poi usa `/voce riprendi`: deve riprendere la risposta, non la frase dimostrativa.
+15. Da due sessioni aggiornate salva contemporaneamente velocità e voce diverse; verifica con `/voce status` che entrambe le modifiche compaiano nella sezione delle preferenze salvate.
 
 ## Privacy e limiti
 
@@ -200,7 +228,7 @@ npm run test:package
 npm pack --dry-run --ignore-scripts
 ```
 
-I test non riproducono audio: simulano `say`, usano directory temporanee e avviano processi Node separati per verificare l'esclusione del blocco audio. Non richiedono dipendenze npm. Serve Node.js 24 o successivo con supporto sperimentale al mocking dei moduli; l'avviso sperimentale è previsto. La riproduzione reale va provata anche in Pi su macOS.
+I test non riproducono audio: simulano `say`, verificano avanzamento, stop e ripresa dei paragrafi, usano directory temporanee e avviano processi Node separati per verificare l'esclusione del blocco audio e i salvataggi concorrenti delle preferenze. Non richiedono dipendenze npm. Serve Node.js 24 o successivo con supporto sperimentale al mocking dei moduli; l'avviso sperimentale è previsto. La riproduzione reale va provata anche in Pi su macOS.
 
 `npm run test:package` crea il tarball, lo installa offline in una directory temporanea (senza scaricare i peer forniti da Pi), controlla manifest e file inclusi, poi carica il pacchetto installato con un loader TypeScript isolato. Verifica registrazione di comandi e scorciatoie, footer e modifiche temporanee senza audio o provider AI; non sostituisce una prova nell'interfaccia di Pi.
 

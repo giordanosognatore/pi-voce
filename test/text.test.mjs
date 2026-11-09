@@ -1,8 +1,33 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readable } from "../text.ts";
+import { readable, speechParagraphs } from "../text.ts";
 import { defaults } from "../settings.ts";
 import { parseVoices, resolveVoice, languageLabel } from "../voices.ts";
+
+test("speech paragraphs keep soft line breaks, skip empty blocks and split after Markdown cleanup", () => {
+  assert.deepEqual(speechParagraphs("  Primo\ncontinua\n\n \nSecondo\r\n\r\nTerzo  "), ["Primo\ncontinua", "Secondo", "Terzo"]);
+  assert.deepEqual(speechParagraphs(" \n\n "), []);
+  assert.deepEqual(speechParagraphs(readable("Prima.\n\n```js\nfirst()\n\nsecond()\n```\n\nDopo.", defaults)), ["Prima.", "Blocco di codice omesso.", "Dopo."]);
+});
+
+test("Markdown cleanup preserves paragraph boundaries around headings and lists", () => {
+  const source = "Introduzione.\n\n### Primo punto\n- Prima voce.\n- Seconda voce.\n\n### Secondo punto\n- Terza voce.\n- Quarta voce.\n\nConclusione.";
+  assert.deepEqual(speechParagraphs(readable(source, defaults)), [
+    "Introduzione.",
+    "Primo punto\nPrima voce.\nSeconda voce.",
+    "Secondo punto\nTerza voce.\nQuarta voce.",
+    "Conclusione.",
+  ]);
+});
+
+test("line-oriented Markdown markers never consume vertical whitespace", () => {
+  for (const block of ["### Titolo ###", "- Voce", "1. Voce", "- [x] Fatto", "> Citazione", "---", "===", "[ref]: https://example.com"]) {
+    const speech = readable(`Prima.\n\n${block}\n\nDopo.`, defaults);
+    const paragraphs = speechParagraphs(speech);
+    assert.equal(paragraphs[0], "Prima.", `${block}: ${JSON.stringify(speech)}`);
+    assert.equal(paragraphs.at(-1), "Dopo.", `${block}: ${JSON.stringify(speech)}`);
+  }
+});
 
 test("omits backtick, tilde, unclosed and indented code fences", () => {
   for (const source of ["```js\nsecret()\n```", "~~~~py\nsecret()\n~~~~", "```\nsecret()", "    secret()\n    next()"])
